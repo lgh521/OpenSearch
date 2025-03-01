@@ -53,7 +53,7 @@ import static org.hamcrest.Matchers.hasSize;
 
 /**
  * This class tests that snapshot operations (Create, Delete, Restore) are blocked when the cluster is read-only.
- *
+ * <p>
  * The @NodeScope TEST is needed because this class updates the cluster setting "cluster.blocks.read_only".
  */
 @ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST)
@@ -80,13 +80,8 @@ public class SnapshotBlocksIT extends OpenSearchIntegTestCase {
 
         logger.info("--> register a repository");
 
-        assertAcked(
-            client().admin()
-                .cluster()
-                .preparePutRepository(REPOSITORY_NAME)
-                .setType("fs")
-                .setSettings(Settings.builder().put("location", randomRepoPath()))
-        );
+        Settings.Builder settings = Settings.builder().put("location", randomRepoPath());
+        OpenSearchIntegTestCase.putRepository(client().admin().cluster(), REPOSITORY_NAME, "fs", settings);
 
         logger.info("--> verify the repository");
         VerifyRepositoryResponse verifyResponse = client().admin().cluster().prepareVerifyRepository(REPOSITORY_NAME).get();

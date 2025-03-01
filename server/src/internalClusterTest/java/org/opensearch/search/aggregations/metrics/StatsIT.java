@@ -66,8 +66,8 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.sameInstance;
 
 public class StatsIT extends AbstractNumericTestCase {
-    public StatsIT(Settings dynamicSettings) {
-        super(dynamicSettings);
+    public StatsIT(Settings staticSettings) {
+        super(staticSettings);
     }
 
     @Override
@@ -84,7 +84,7 @@ public class StatsIT extends AbstractNumericTestCase {
 
         assertShardExecutionState(searchResponse, 0);
 
-        assertThat(searchResponse.getHits().getTotalHits().value, equalTo(2L));
+        assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(2L));
         Histogram histo = searchResponse.getAggregations().get("histo");
         assertThat(histo, notNullValue());
         Histogram.Bucket bucket = histo.getBuckets().get(1);

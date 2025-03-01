@@ -1,3 +1,4 @@
+
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -12,6 +13,7 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.opensearch.common.StreamContext;
 import org.opensearch.common.blobstore.AsyncMultiStreamBlobContainer;
 import org.opensearch.common.blobstore.BlobPath;
+import org.opensearch.common.blobstore.DeleteResult;
 import org.opensearch.common.blobstore.fs.FsBlobContainer;
 import org.opensearch.common.blobstore.fs.FsBlobStore;
 import org.opensearch.common.blobstore.stream.read.ReadContext;
@@ -27,6 +29,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -124,13 +127,13 @@ public class MockFsAsyncBlobContainer extends FsBlobContainer implements AsyncMu
                 long contentLength = listBlobs().get(blobName).length();
                 long partSize = contentLength / 10;
                 int numberOfParts = (int) ((contentLength % partSize) == 0 ? contentLength / partSize : (contentLength / partSize) + 1);
-                List<InputStreamContainer> blobPartStreams = new ArrayList<>();
+                List<ReadContext.StreamPartCreator> blobPartStreams = new ArrayList<>();
                 for (int partNumber = 0; partNumber < numberOfParts; partNumber++) {
                     long offset = partNumber * partSize;
                     InputStreamContainer blobPartStream = new InputStreamContainer(readBlob(blobName, offset, partSize), partSize, offset);
-                    blobPartStreams.add(blobPartStream);
+                    blobPartStreams.add(() -> CompletableFuture.completedFuture(blobPartStream));
                 }
-                ReadContext blobReadContext = new ReadContext(contentLength, blobPartStreams, null);
+                ReadContext blobReadContext = new ReadContext.Builder(contentLength, blobPartStreams).build();
                 listener.onResponse(blobReadContext);
             } catch (Exception e) {
                 listener.onFailure(e);
@@ -144,5 +147,15 @@ public class MockFsAsyncBlobContainer extends FsBlobContainer implements AsyncMu
 
     private boolean isSegmentFile(String filename) {
         return !filename.endsWith(".tlog") && !filename.endsWith(".ckp");
+    }
+
+    @Override
+    public void deleteAsync(ActionListener<DeleteResult> completionListener) {
+        throw new UnsupportedOperationException("deleteAsync");
+    }
+
+    @Override
+    public void deleteBlobsAsyncIgnoringIfNotExists(List<String> blobNames, ActionListener<Void> completionListener) {
+        throw new UnsupportedOperationException("deleteBlobsAsyncIgnoringIfNotExists");
     }
 }

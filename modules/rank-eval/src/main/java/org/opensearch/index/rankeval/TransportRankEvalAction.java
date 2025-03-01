@@ -38,7 +38,6 @@ import org.opensearch.action.search.MultiSearchResponse.Item;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
-import org.opensearch.client.Client;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.core.action.ActionListener;
@@ -54,6 +53,7 @@ import org.opensearch.search.SearchHit;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.tasks.Task;
 import org.opensearch.transport.TransportService;
+import org.opensearch.transport.client.Client;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -71,10 +71,10 @@ import static org.opensearch.index.rankeval.RatedRequest.validateEvaluatedQuery;
  * supplied query parameters) against a set of possible search requests (read:
  * search specifications, expressed as query/search request templates) and
  * compares the result against a set of annotated documents per search intent.
- *
+ * <p>
  * If any documents are returned that haven't been annotated the document id of
  * those is returned per search intent.
- *
+ * <p>
  * The resulting search quality is computed in terms of precision at n and
  * returned for each search specification for the full set of search intents as
  * averaged precision at n.

@@ -39,7 +39,6 @@ import org.opensearch.action.RoutingMissingException;
 import org.opensearch.action.search.SearchPhaseExecutionException;
 import org.opensearch.action.search.ShardSearchFailure;
 import org.opensearch.action.support.broadcast.BroadcastShardOperationFailedException;
-import org.opensearch.client.transport.NoNodeAvailableException;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.coordination.NoClusterManagerBlockService;
 import org.opensearch.cluster.node.DiscoveryNode;
@@ -74,6 +73,7 @@ import org.opensearch.search.internal.ShardSearchContextId;
 import org.opensearch.snapshots.ConcurrentSnapshotExecutionException;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.RemoteTransportException;
+import org.opensearch.transport.client.transport.NoNodeAvailableException;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
@@ -976,7 +976,7 @@ public class OpenSearchExceptionTests extends OpenSearchTestCase {
 
     /**
      * Builds a {@link ToXContent} using a JSON XContentBuilder and compares the result to the given json in string format.
-     *
+     * <p>
      * By default, the stack trace of the exception is not rendered. The parameter `errorTrace` forces the stack trace to
      * be rendered like the REST API does when the "error_trace" parameter is set to true.
      */

@@ -69,6 +69,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.UUIDs;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.common.lucene.LuceneTests;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.FeatureFlags;
@@ -84,9 +85,10 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.seqno.ReplicationTracker;
 import org.opensearch.index.seqno.RetentionLease;
 import org.opensearch.index.seqno.SequenceNumbers;
+import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.indices.replication.common.ReplicationType;
-import org.opensearch.indices.store.TransportNodesListShardStoreMetadata;
+import org.opensearch.indices.store.TransportNodesListShardStoreMetadataHelper.StoreFilesMetadata;
 import org.opensearch.test.DummyShardLock;
 import org.opensearch.test.FeatureFlagSetter;
 import org.opensearch.test.IndexSettingsModule;
@@ -391,7 +393,7 @@ public class StoreTests extends OpenSearchTestCase {
         metadata = store.getMetadata();
         assertThat(metadata.asMap().isEmpty(), is(false));
         for (StoreFileMetadata meta : metadata) {
-            try (IndexInput input = store.directory().openInput(meta.name(), IOContext.DEFAULT)) {
+            try (IndexInput input = store.directory().openInput(meta.name(), IOContext.READONCE)) {
                 String checksum = Store.digestToString(CodecUtil.retrieveChecksum(input));
                 assertThat("File: " + meta.name() + " has a different checksum", meta.checksum(), equalTo(checksum));
                 assertThat(meta.writtenBy(), equalTo(Version.LATEST));
@@ -798,7 +800,7 @@ public class StoreTests extends OpenSearchTestCase {
             assertEquals(shardId, theLock.getShardId());
             assertEquals(lock, theLock);
             count.incrementAndGet();
-        });
+        }, null);
         assertEquals(count.get(), 0);
 
         final int iters = randomIntBetween(1, 10);
@@ -807,6 +809,26 @@ public class StoreTests extends OpenSearchTestCase {
         }
 
         assertEquals(count.get(), 1);
+    }
+
+    public void testStoreShardPath() {
+        final ShardId shardId = new ShardId("index", "_na_", 1);
+        final Settings settings = Settings.builder()
+            .put(IndexMetadata.SETTING_VERSION_CREATED, org.opensearch.Version.CURRENT)
+            .put(Store.INDEX_STORE_STATS_REFRESH_INTERVAL_SETTING.getKey(), TimeValue.timeValueMinutes(0))
+            .build();
+        final Path path = createTempDir().resolve(shardId.getIndex().getUUID()).resolve(String.valueOf(shardId.id()));
+        final ShardPath shardPath = new ShardPath(false, path, path, shardId);
+        final Store store = new Store(
+            shardId,
+            IndexSettingsModule.newIndexSettings("index", settings),
+            StoreTests.newDirectory(random()),
+            new DummyShardLock(shardId),
+            Store.OnClose.EMPTY,
+            shardPath
+        );
+        assertEquals(shardPath, store.shardPath());
+        store.close();
     }
 
     public void testStoreStats() throws IOException {
@@ -959,12 +981,11 @@ public class StoreTests extends OpenSearchTestCase {
                 )
             );
         }
-        TransportNodesListShardStoreMetadata.StoreFilesMetadata outStoreFileMetadata =
-            new TransportNodesListShardStoreMetadata.StoreFilesMetadata(
-                new ShardId("test", "_na_", 0),
-                metadataSnapshot,
-                peerRecoveryRetentionLeases
-            );
+        StoreFilesMetadata outStoreFileMetadata = new StoreFilesMetadata(
+            new ShardId("test", "_na_", 0),
+            metadataSnapshot,
+            peerRecoveryRetentionLeases
+        );
         ByteArrayOutputStream outBuffer = new ByteArrayOutputStream();
         OutputStreamStreamOutput out = new OutputStreamStreamOutput(outBuffer);
         org.opensearch.Version targetNodeVersion = randomVersion(random());
@@ -973,8 +994,7 @@ public class StoreTests extends OpenSearchTestCase {
         ByteArrayInputStream inBuffer = new ByteArrayInputStream(outBuffer.toByteArray());
         InputStreamStreamInput in = new InputStreamStreamInput(inBuffer);
         in.setVersion(targetNodeVersion);
-        TransportNodesListShardStoreMetadata.StoreFilesMetadata inStoreFileMetadata =
-            new TransportNodesListShardStoreMetadata.StoreFilesMetadata(in);
+        StoreFilesMetadata inStoreFileMetadata = new StoreFilesMetadata(in);
         Iterator<StoreFileMetadata> outFiles = outStoreFileMetadata.iterator();
         for (StoreFileMetadata inFile : inStoreFileMetadata) {
             assertThat(inFile.name(), equalTo(outFiles.next().name()));
@@ -1265,9 +1285,8 @@ public class StoreTests extends OpenSearchTestCase {
     @SuppressForbidden(reason = "sets the SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY feature flag")
     public void testReadSegmentsFromOldIndices() throws Exception {
         int expectedIndexCreatedVersionMajor = SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY_MINIMUM_VERSION.luceneVersion.major;
-        final String pathToTestIndex = "/indices/bwc/es-6.3.0/testIndex-es-6.3.0.zip";
         Path tmp = createTempDir();
-        TestUtil.unzip(getClass().getResourceAsStream(pathToTestIndex), tmp);
+        TestUtil.unzip(getClass().getResourceAsStream(LuceneTests.OLDER_VERSION_INDEX_ZIP_RELATIVE_PATH), tmp);
         final ShardId shardId = new ShardId("index", "_na_", 1);
         Store store = null;
 
@@ -1290,10 +1309,9 @@ public class StoreTests extends OpenSearchTestCase {
     }
 
     public void testReadSegmentsFromOldIndicesFailure() throws IOException {
-        final String pathToTestIndex = "/indices/bwc/es-6.3.0/testIndex-es-6.3.0.zip";
         final ShardId shardId = new ShardId("index", "_na_", 1);
         Path tmp = createTempDir();
-        TestUtil.unzip(getClass().getResourceAsStream(pathToTestIndex), tmp);
+        TestUtil.unzip(getClass().getResourceAsStream(LuceneTests.OLDER_VERSION_INDEX_ZIP_RELATIVE_PATH), tmp);
         IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(
             "index",
             Settings.builder()

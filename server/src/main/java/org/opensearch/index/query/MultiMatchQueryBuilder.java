@@ -398,8 +398,8 @@ public class MultiMatchQueryBuilder extends AbstractQueryBuilder<MultiMatchQuery
     }
 
     @Deprecated
-    /**
-     * Sets the fuzziness used when evaluated to a fuzzy query type. Defaults to "AUTO".
+    /*
+      Sets the fuzziness used when evaluated to a fuzzy query type. Defaults to "AUTO".
      */
     public MultiMatchQueryBuilder fuzziness(Object fuzziness) {
         if (fuzziness != null) {
@@ -822,7 +822,13 @@ public class MultiMatchQueryBuilder extends AbstractQueryBuilder<MultiMatchQuery
         multiMatchQuery.setMaxExpansions(maxExpansions);
         multiMatchQuery.setOccur(operator.toBooleanClauseOccur());
         if (fuzzyRewrite != null) {
-            multiMatchQuery.setFuzzyRewriteMethod(QueryParsers.parseRewriteMethod(fuzzyRewrite, null, LoggingDeprecationHandler.INSTANCE));
+            multiMatchQuery.setFuzzyRewriteMethod(
+                QueryParsers.parseRewriteMethod(
+                    fuzzyRewrite,
+                    FuzzyQuery.defaultRewriteMethod(maxExpansions),
+                    LoggingDeprecationHandler.INSTANCE
+                )
+            );
         }
         if (tieBreaker != null) {
             multiMatchQuery.setTieBreaker(tieBreaker);

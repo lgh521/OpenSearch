@@ -62,6 +62,7 @@ import org.apache.lucene.tests.search.RandomApproximationQuery;
 import org.apache.lucene.tests.util.TestUtil;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.shard.IndexShard;
+import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.search.internal.ContextIndexSearcher;
 import org.opensearch.search.internal.SearchContext;
 import org.opensearch.search.profile.ProfileResult;
@@ -128,6 +129,9 @@ public class QueryProfilerTests extends OpenSearchTestCase {
         SearchContext searchContext = mock(SearchContext.class);
         IndexShard indexShard = mock(IndexShard.class);
         when(searchContext.indexShard()).thenReturn(indexShard);
+        SearchOperationListener searchOperationListener = new SearchOperationListener() {
+        };
+        when(indexShard.getSearchOperationListener()).thenReturn(searchOperationListener);
         when(searchContext.bucketCollectorProcessor()).thenReturn(SearchContext.NO_OP_BUCKET_COLLECTOR_PROCESSOR);
         searcher = new ContextIndexSearcher(
             reader,
@@ -161,7 +165,9 @@ public class QueryProfilerTests extends OpenSearchTestCase {
     }
 
     public void testBasic() throws IOException {
-        QueryProfiler profiler = new QueryProfiler(executor != null);
+        QueryProfiler profiler = executor != null
+            ? new ConcurrentQueryProfiler(new ConcurrentQueryProfileTree())
+            : new QueryProfiler(new InternalQueryProfileTree());
         searcher.setProfiler(profiler);
         Query query = new TermQuery(new Term("foo", "bar"));
         searcher.search(query, 1);
@@ -228,7 +234,9 @@ public class QueryProfilerTests extends OpenSearchTestCase {
     }
 
     public void testNoScoring() throws IOException {
-        QueryProfiler profiler = new QueryProfiler(executor != null);
+        QueryProfiler profiler = executor != null
+            ? new ConcurrentQueryProfiler(new ConcurrentQueryProfileTree())
+            : new QueryProfiler(new InternalQueryProfileTree());
         searcher.setProfiler(profiler);
         Query query = new TermQuery(new Term("foo", "bar"));
         searcher.search(query, 1, Sort.INDEXORDER); // scores are not needed
@@ -295,7 +303,9 @@ public class QueryProfilerTests extends OpenSearchTestCase {
     }
 
     public void testUseIndexStats() throws IOException {
-        QueryProfiler profiler = new QueryProfiler(executor != null);
+        QueryProfiler profiler = executor != null
+            ? new ConcurrentQueryProfiler(new ConcurrentQueryProfileTree())
+            : new QueryProfiler(new InternalQueryProfileTree());
         searcher.setProfiler(profiler);
         Query query = new TermQuery(new Term("foo", "bar"));
         searcher.count(query); // will use index stats
@@ -309,7 +319,9 @@ public class QueryProfilerTests extends OpenSearchTestCase {
     }
 
     public void testApproximations() throws IOException {
-        QueryProfiler profiler = new QueryProfiler(executor != null);
+        QueryProfiler profiler = executor != null
+            ? new ConcurrentQueryProfiler(new ConcurrentQueryProfileTree())
+            : new QueryProfiler(new InternalQueryProfileTree());
         searcher.setProfiler(profiler);
         Query query = new RandomApproximationQuery(new TermQuery(new Term("foo", "bar")), random());
         searcher.count(query);
@@ -422,11 +434,6 @@ public class QueryProfilerTests extends OpenSearchTestCase {
 
                 @Override
                 public Explanation explain(LeafReaderContext context, int doc) throws IOException {
-                    throw new UnsupportedOperationException();
-                }
-
-                @Override
-                public Scorer scorer(LeafReaderContext context) throws IOException {
                     throw new UnsupportedOperationException();
                 }
 

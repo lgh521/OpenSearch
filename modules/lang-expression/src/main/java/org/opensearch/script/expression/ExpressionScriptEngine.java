@@ -59,6 +59,8 @@ import org.opensearch.script.ScriptException;
 import org.opensearch.script.TermsSetQueryScript;
 import org.opensearch.search.lookup.SearchLookup;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -73,7 +75,7 @@ import java.util.function.Function;
 
 /**
  * Provides the infrastructure for Lucene expressions as a scripting language for OpenSearch.
- *
+ * <p>
  * Only contexts returning numeric types or {@link Object} are supported.
  */
 public class ExpressionScriptEngine implements ScriptEngine {
@@ -170,6 +172,7 @@ public class ExpressionScriptEngine implements ScriptEngine {
         return NAME;
     }
 
+    @SuppressWarnings("removal")
     @Override
     public <T> T compile(String scriptName, String scriptSource, ScriptContext<T> context, Map<String, String> params) {
         // classloader created here
@@ -196,7 +199,7 @@ public class ExpressionScriptEngine implements ScriptEngine {
                         };
                     }
                     // NOTE: validation is delayed to allow runtime vars, and we don't have access to per index stuff here
-                    return JavascriptCompiler.compile(scriptSource, JavascriptCompiler.DEFAULT_FUNCTIONS, loader);
+                    return JavascriptCompiler.compile(scriptSource, JavascriptCompiler.DEFAULT_FUNCTIONS);
                 } catch (ParseException e) {
                     throw convertToScriptException("compile error", scriptSource, scriptSource, e);
                 }
@@ -249,7 +252,12 @@ public class ExpressionScriptEngine implements ScriptEngine {
                             placeholder.setValue(((Number) value).doubleValue());
                         }
                     });
-                    return expr.evaluate(functionValuesArray);
+
+                    try {
+                        return expr.evaluate(functionValuesArray);
+                    } catch (final IOException ex) {
+                        throw new UncheckedIOException(ex);
+                    }
                 }
             };
         };
@@ -316,14 +324,14 @@ public class ExpressionScriptEngine implements ScriptEngine {
         // instead of complicating SimpleBindings (which should stay simple)
         SimpleBindings bindings = new SimpleBindings();
         boolean needsScores = false;
-        ReplaceableConstDoubleValueSource specialValue = null;
+        PerThreadReplaceableConstDoubleValueSource specialValue = null;
         for (String variable : expr.variables) {
             try {
                 if (variable.equals("_score")) {
                     bindings.add("_score", DoubleValuesSource.SCORES);
                     needsScores = true;
                 } else if (variable.equals("_value")) {
-                    specialValue = new ReplaceableConstDoubleValueSource();
+                    specialValue = new PerThreadReplaceableConstDoubleValueSource();
                     bindings.add("_value", specialValue);
                     // noop: _value is special for aggregations, and is handled in ExpressionScriptBindings
                     // TODO: if some uses it in a scoring expression, they will get a nasty failure when evaluating...need a
@@ -388,7 +396,7 @@ public class ExpressionScriptEngine implements ScriptEngine {
         // NOTE: if we need to do anything complicated with bindings in the future, we can just extend Bindings,
         // instead of complicating SimpleBindings (which should stay simple)
         SimpleBindings bindings = new SimpleBindings();
-        ReplaceableConstDoubleValueSource specialValue = null;
+        PerThreadReplaceableConstDoubleValueSource specialValue = null;
         boolean needsScores = false;
         for (String variable : expr.variables) {
             try {
@@ -396,7 +404,7 @@ public class ExpressionScriptEngine implements ScriptEngine {
                     bindings.add("_score", DoubleValuesSource.SCORES);
                     needsScores = true;
                 } else if (variable.equals("_value")) {
-                    specialValue = new ReplaceableConstDoubleValueSource();
+                    specialValue = new PerThreadReplaceableConstDoubleValueSource();
                     bindings.add("_value", specialValue);
                     // noop: _value is special for aggregations, and is handled in ExpressionScriptBindings
                     // TODO: if some uses it in a scoring expression, they will get a nasty failure when evaluating...need a

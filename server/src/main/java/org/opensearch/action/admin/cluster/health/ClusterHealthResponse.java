@@ -38,6 +38,7 @@ import org.opensearch.cluster.awarenesshealth.ClusterAwarenessHealth;
 import org.opensearch.cluster.health.ClusterHealthStatus;
 import org.opensearch.cluster.health.ClusterIndexHealth;
 import org.opensearch.cluster.health.ClusterStateHealth;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.xcontent.StatusToXContentObject;
@@ -67,8 +68,9 @@ import static org.opensearch.core.xcontent.ConstructingObjectParser.optionalCons
 /**
  * Transport response for Cluster Health
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class ClusterHealthResponse extends ActionResponse implements StatusToXContentObject {
     private static final String CLUSTER_NAME = "cluster_name";
     private static final String STATUS = "status";
@@ -235,6 +237,26 @@ public class ClusterHealthResponse extends ActionResponse implements StatusToXCo
         this.clusterHealthStatus = clusterStateHealth.getStatus();
     }
 
+    public ClusterHealthResponse(
+        String clusterName,
+        String[] concreteIndices,
+        ClusterHealthRequest clusterHealthRequest,
+        ClusterState clusterState,
+        int numberOfPendingTasks,
+        int numberOfInFlightFetch,
+        TimeValue taskMaxWaitingTime
+    ) {
+        this.clusterName = clusterName;
+        this.numberOfPendingTasks = numberOfPendingTasks;
+        this.numberOfInFlightFetch = numberOfInFlightFetch;
+        this.taskMaxWaitingTime = taskMaxWaitingTime;
+        this.clusterStateHealth = clusterHealthRequest.isApplyLevelAtTransportLayer()
+            ? new ClusterStateHealth(clusterState, concreteIndices, clusterHealthRequest.level())
+            : new ClusterStateHealth(clusterState, concreteIndices);
+        this.clusterHealthStatus = clusterStateHealth.getStatus();
+        this.delayedUnassignedShards = clusterStateHealth.getDelayedUnassignedShards();
+    }
+
     // Awareness Attribute health
     public ClusterHealthResponse(
         String clusterName,
@@ -254,6 +276,29 @@ public class ClusterHealthResponse extends ActionResponse implements StatusToXCo
             numberOfPendingTasks,
             numberOfInFlightFetch,
             delayedUnassignedShards,
+            taskMaxWaitingTime
+        );
+        this.clusterAwarenessHealth = new ClusterAwarenessHealth(clusterState, clusterSettings, awarenessAttributeName);
+    }
+
+    public ClusterHealthResponse(
+        String clusterName,
+        ClusterHealthRequest clusterHealthRequest,
+        ClusterState clusterState,
+        ClusterSettings clusterSettings,
+        String[] concreteIndices,
+        String awarenessAttributeName,
+        int numberOfPendingTasks,
+        int numberOfInFlightFetch,
+        TimeValue taskMaxWaitingTime
+    ) {
+        this(
+            clusterName,
+            concreteIndices,
+            clusterHealthRequest,
+            clusterState,
+            numberOfPendingTasks,
+            numberOfInFlightFetch,
             taskMaxWaitingTime
         );
         this.clusterAwarenessHealth = new ClusterAwarenessHealth(clusterState, clusterSettings, awarenessAttributeName);
@@ -320,12 +365,6 @@ public class ClusterHealthResponse extends ActionResponse implements StatusToXCo
 
     public boolean hasDiscoveredClusterManager() {
         return clusterStateHealth.hasDiscoveredClusterManager();
-    }
-
-    /** @deprecated As of 2.2, because supporting inclusive language, replaced by {@link #hasDiscoveredClusterManager()} */
-    @Deprecated
-    public boolean hasDiscoveredMaster() {
-        return hasDiscoveredClusterManager();
     }
 
     public int getNumberOfPendingTasks() {

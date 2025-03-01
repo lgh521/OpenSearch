@@ -12,7 +12,7 @@ import org.opensearch.action.admin.indices.rollover.RolloverRequest;
 import org.opensearch.action.admin.indices.rollover.RolloverResponse;
 import org.opensearch.action.admin.indices.template.delete.DeleteComposableIndexTemplateAction;
 import org.opensearch.action.admin.indices.template.put.PutComposableIndexTemplateAction;
-import org.opensearch.action.support.master.AcknowledgedResponse;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.cluster.metadata.ComposableIndexTemplate;
 import org.opensearch.cluster.metadata.DataStream;
 import org.opensearch.cluster.metadata.Template;
@@ -37,6 +37,7 @@ public class DataStreamTestCase extends OpenSearchIntegTestCase {
         CreateDataStreamAction.Request request = new CreateDataStreamAction.Request(name);
         AcknowledgedResponse response = client().admin().indices().createDataStream(request).get();
         assertThat(response.isAcknowledged(), is(true));
+        performRemoteStoreTestAction();
         return response;
     }
 
@@ -67,6 +68,7 @@ public class DataStreamTestCase extends OpenSearchIntegTestCase {
         RolloverResponse response = client().admin().indices().rolloverIndex(request).get();
         assertThat(response.isAcknowledged(), is(true));
         assertThat(response.isRolledOver(), is(true));
+        performRemoteStoreTestAction();
         return response;
     }
 
@@ -109,5 +111,4 @@ public class DataStreamTestCase extends OpenSearchIntegTestCase {
         assertThat(response.isAcknowledged(), is(true));
         return response;
     }
-
 }

@@ -39,7 +39,6 @@ import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.action.support.WriteRequest.RefreshPolicy;
 import org.opensearch.action.support.WriteResponse;
 import org.opensearch.action.support.replication.ReplicationOperation.ReplicaResponse;
-import org.opensearch.client.transport.NoNodeAvailableException;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.action.shard.ShardStateAction;
 import org.opensearch.cluster.metadata.IndexMetadata;
@@ -74,6 +73,7 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportService;
+import org.opensearch.transport.client.transport.NoNodeAvailableException;
 import org.hamcrest.MatcherAssert;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -477,7 +477,8 @@ public class TransportWriteActionTests extends OpenSearchTestCase {
                 ignore -> ThreadPool.Names.SAME,
                 false,
                 new IndexingPressureService(Settings.EMPTY, TransportWriteActionTests.this.clusterService),
-                new SystemIndices(emptyMap())
+                new SystemIndices(emptyMap()),
+                NoopTracer.INSTANCE
             );
             this.withDocumentFailureOnPrimary = withDocumentFailureOnPrimary;
             this.withDocumentFailureOnReplica = withDocumentFailureOnReplica;
@@ -505,7 +506,8 @@ public class TransportWriteActionTests extends OpenSearchTestCase {
                 ignore -> ThreadPool.Names.SAME,
                 false,
                 new IndexingPressureService(settings, clusterService),
-                new SystemIndices(emptyMap())
+                new SystemIndices(emptyMap()),
+                NoopTracer.INSTANCE
             );
             this.withDocumentFailureOnPrimary = false;
             this.withDocumentFailureOnReplica = false;

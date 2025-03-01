@@ -33,6 +33,7 @@
 package org.opensearch.action.get;
 
 import org.opensearch.OpenSearchParseException;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.document.DocumentField;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.ParsingException;
@@ -45,6 +46,7 @@ import org.opensearch.core.xcontent.ToXContentObject;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.index.get.GetResult;
+import org.opensearch.transport.client.Client;
 
 import java.io.IOException;
 import java.util.Iterator;
@@ -56,10 +58,11 @@ import java.util.Objects;
  * The response of a get action.
  *
  * @see GetRequest
- * @see org.opensearch.client.Client#get(GetRequest)
+ * @see Client#get(GetRequest)
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class GetResponse extends ActionResponse implements Iterable<DocumentField>, ToXContentObject {
 
     GetResult getResult;

@@ -8,11 +8,15 @@
 
 package org.opensearch.identity.tokens;
 
+import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.identity.Subject;
 
 /**
  * This interface defines the expected methods of a token manager
+ *
+ * @opensearch.experimental
  */
+@ExperimentalApi
 public interface TokenManager {
 
     /**
@@ -24,9 +28,10 @@ public interface TokenManager {
     public AuthToken issueOnBehalfOfToken(final Subject subject, final OnBehalfOfClaims claims);
 
     /**
-     * Authenticates a provided authToken
-     * @param authToken: The authToken to authenticate
-     * @return The authenticated subject
+     * Create a new service account token
+     *
+     * @param audience: A string representing the unique id of the extension for which a service account token should be generated
+     * @return a new auth token
      */
-    public Subject authenticateToken(AuthToken authToken);
+    public AuthToken issueServiceAccountToken(final String audience);
 }

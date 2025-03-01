@@ -39,7 +39,6 @@ import org.opensearch.action.NoShardAvailableActionException;
 import org.opensearch.action.get.GetResponse;
 import org.opensearch.action.index.IndexRequestBuilder;
 import org.opensearch.action.index.IndexResponse;
-import org.opensearch.client.Client;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.action.shard.ShardStateAction;
 import org.opensearch.cluster.coordination.ClusterBootstrapService;
@@ -64,6 +63,7 @@ import org.opensearch.test.disruption.NetworkDisruption.Bridge;
 import org.opensearch.test.disruption.NetworkDisruption.TwoPartitions;
 import org.opensearch.test.disruption.ServiceDisruptionScheme;
 import org.opensearch.test.junit.annotations.TestIssueLogging;
+import org.opensearch.transport.client.Client;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -461,7 +461,7 @@ public class ClusterDisruptionIT extends AbstractDisruptionTestCase {
 
     /**
      * Tests that indices are properly deleted even if there is a cluster-manager transition in between.
-     * Test for https://github.com/elastic/elasticsearch/issues/11665
+     * Test for <a href="https://github.com/elastic/elasticsearch/issues/11665">Elasticsearch issue #11665</a>
      */
     public void testIndicesDeleted() throws Exception {
         final String idxName = "test";

@@ -33,6 +33,7 @@
 package org.opensearch.index.engine;
 
 import org.opensearch.Version;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.common.io.stream.Writeable;
@@ -40,6 +41,8 @@ import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.index.ReplicationStats;
+import org.opensearch.index.codec.composite.composite912.Composite912DocValuesFormat;
+import org.opensearch.index.codec.fuzzy.FuzzyFilterPostingsFormat;
 import org.opensearch.index.remote.RemoteSegmentStats;
 
 import java.io.IOException;
@@ -50,8 +53,9 @@ import java.util.Map;
 /**
  * Tracker for segment stats
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class SegmentsStats implements Writeable, ToXContentFragment {
 
     private long count;
@@ -93,7 +97,12 @@ public class SegmentsStats implements Writeable, ToXContentFragment {
         Map.entry("tvx", "Term Vector Index"),
         Map.entry("tvd", "Term Vector Documents"),
         Map.entry("tvf", "Term Vector Fields"),
-        Map.entry("liv", "Live Documents")
+        Map.entry("liv", "Live Documents"),
+        Map.entry(Composite912DocValuesFormat.DATA_EXTENSION, "Composite Index"),
+        Map.entry(Composite912DocValuesFormat.META_EXTENSION, "Composite Index"),
+        Map.entry(Composite912DocValuesFormat.DATA_DOC_VALUES_EXTENSION, "Composite Index DocValues"),
+        Map.entry(Composite912DocValuesFormat.META_DOC_VALUES_EXTENSION, "Composite Index DocValues"),
+        Map.entry(FuzzyFilterPostingsFormat.FUZZY_FILTER_FILE_EXTENSION, "Fuzzy Filter")
     );
 
     public SegmentsStats() {

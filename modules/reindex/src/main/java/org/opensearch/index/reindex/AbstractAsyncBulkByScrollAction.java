@@ -48,7 +48,6 @@ import org.opensearch.action.bulk.Retry;
 import org.opensearch.action.delete.DeleteRequest;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.support.TransportAction;
-import org.opensearch.client.ParentTaskAssigningClient;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
@@ -67,6 +66,7 @@ import org.opensearch.script.UpdateScript;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.sort.SortBuilder;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.client.ParentTaskAssigningClient;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -206,7 +206,7 @@ public abstract class AbstractAsyncBulkByScrollAction<
 
     /**
      * Build the {@link BiFunction} to apply to all {@link RequestWrapper}.
-     *
+     * <p>
      * Public for testings....
      */
     public BiFunction<RequestWrapper<?>, ScrollableHitSource.Hit, RequestWrapper<?>> buildScriptApplier() {

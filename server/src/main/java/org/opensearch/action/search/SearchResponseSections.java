@@ -32,6 +32,7 @@
 
 package org.opensearch.action.search;
 
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.ParseField;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.xcontent.ToXContentFragment;
@@ -39,6 +40,7 @@ import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.search.SearchExtBuilder;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.aggregations.Aggregations;
+import org.opensearch.search.pipeline.ProcessorExecutionDetail;
 import org.opensearch.search.profile.ProfileShardResult;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.suggest.Suggest;
@@ -53,17 +55,18 @@ import java.util.Objects;
 /**
  * Base class that holds the various sections which a search response is
  * composed of (hits, aggs, suggestions etc.) and allows to retrieve them.
- *
+ * <p>
  * The reason why this class exists is that the high level REST client uses its own classes
  * to parse aggregations into, which are not serializable. This is the common part that can be
  * shared between core and client.
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class SearchResponseSections implements ToXContentFragment {
 
     public static final ParseField EXT_FIELD = new ParseField("ext");
-
+    public static final ParseField PROCESSOR_RESULT_FIELD = new ParseField("processor_results");
     protected final SearchHits hits;
     protected final Aggregations aggregations;
     protected final Suggest suggest;
@@ -72,6 +75,7 @@ public class SearchResponseSections implements ToXContentFragment {
     protected final Boolean terminatedEarly;
     protected final int numReducePhases;
     protected final List<SearchExtBuilder> searchExtBuilders = new ArrayList<>();
+    protected final List<ProcessorExecutionDetail> processorResult = new ArrayList<>();
 
     public SearchResponseSections(
         SearchHits hits,
@@ -82,7 +86,39 @@ public class SearchResponseSections implements ToXContentFragment {
         SearchProfileShardResults profileResults,
         int numReducePhases
     ) {
-        this(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, Collections.emptyList());
+        this(
+            hits,
+            aggregations,
+            suggest,
+            timedOut,
+            terminatedEarly,
+            profileResults,
+            numReducePhases,
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+    }
+
+    public SearchResponseSections(
+        SearchHits hits,
+        Aggregations aggregations,
+        Suggest suggest,
+        boolean timedOut,
+        Boolean terminatedEarly,
+        SearchProfileShardResults profileResults,
+        int numReducePhases,
+        List<SearchExtBuilder> searchExtBuilders,
+        List<ProcessorExecutionDetail> processorResult
+    ) {
+        this.hits = hits;
+        this.aggregations = aggregations;
+        this.suggest = suggest;
+        this.profileResults = profileResults;
+        this.timedOut = timedOut;
+        this.terminatedEarly = terminatedEarly;
+        this.numReducePhases = numReducePhases;
+        this.processorResult.addAll(processorResult);
+        this.searchExtBuilders.addAll(Objects.requireNonNull(searchExtBuilders, "searchExtBuilders must not be null"));
     }
 
     public SearchResponseSections(
@@ -95,14 +131,17 @@ public class SearchResponseSections implements ToXContentFragment {
         int numReducePhases,
         List<SearchExtBuilder> searchExtBuilders
     ) {
-        this.hits = hits;
-        this.aggregations = aggregations;
-        this.suggest = suggest;
-        this.profileResults = profileResults;
-        this.timedOut = timedOut;
-        this.terminatedEarly = terminatedEarly;
-        this.numReducePhases = numReducePhases;
-        this.searchExtBuilders.addAll(Objects.requireNonNull(searchExtBuilders, "searchExtBuilders must not be null"));
+        this(
+            hits,
+            aggregations,
+            suggest,
+            timedOut,
+            terminatedEarly,
+            profileResults,
+            numReducePhases,
+            searchExtBuilders,
+            Collections.emptyList()
+        );
     }
 
     public final boolean timedOut() {
@@ -164,11 +203,19 @@ public class SearchResponseSections implements ToXContentFragment {
             }
             builder.endObject();
         }
+
+        if (!processorResult.isEmpty()) {
+            builder.field(PROCESSOR_RESULT_FIELD.getPreferredName(), processorResult);
+        }
         return builder;
     }
 
     public List<SearchExtBuilder> getSearchExtBuilders() {
         return Collections.unmodifiableList(this.searchExtBuilders);
+    }
+
+    public List<ProcessorExecutionDetail> getProcessorResult() {
+        return processorResult;
     }
 
     protected void writeTo(StreamOutput out) throws IOException {

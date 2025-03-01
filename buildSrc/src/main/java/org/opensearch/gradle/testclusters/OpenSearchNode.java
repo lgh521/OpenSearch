@@ -116,7 +116,12 @@ public class OpenSearchNode implements TestClusterConfiguration {
     private static final TimeUnit NODE_UP_TIMEOUT_UNIT = TimeUnit.MINUTES;
     private static final int ADDITIONAL_CONFIG_TIMEOUT = 15;
     private static final TimeUnit ADDITIONAL_CONFIG_TIMEOUT_UNIT = TimeUnit.SECONDS;
-    private static final List<String> OVERRIDABLE_SETTINGS = Arrays.asList("path.repo", "discovery.seed_providers", "discovery.seed_hosts");
+    private static final List<String> OVERRIDABLE_SETTINGS = Arrays.asList(
+        "path.repo",
+        "discovery.seed_providers",
+        "discovery.seed_hosts",
+        "indices.breaker.total.use_real_memory"
+    );
 
     private static final int TAIL_LOG_MESSAGES_COUNT = 40;
     private static final List<String> MESSAGES_WE_DONT_CARE_ABOUT = Arrays.asList(
@@ -543,7 +548,7 @@ public class OpenSearchNode implements TestClusterConfiguration {
 
         logToProcessStdout("Creating opensearch keystore with password set to [" + keystorePassword + "]");
         if (keystorePassword.length() > 0) {
-            runOpenSearchBinScriptWithInput(keystorePassword + "\n" + keystorePassword, "opensearch-keystore", "create", "-p");
+            runOpenSearchBinScriptWithInput(keystorePassword + "\n" + keystorePassword + "\n", "opensearch-keystore", "create", "-p");
         } else {
             runOpenSearchBinScript("opensearch-keystore", "-v", "create");
         }
@@ -551,7 +556,7 @@ public class OpenSearchNode implements TestClusterConfiguration {
         if (keystoreSettings.isEmpty() == false || keystoreFiles.isEmpty() == false) {
             logToProcessStdout("Adding " + keystoreSettings.size() + " keystore settings and " + keystoreFiles.size() + " keystore files");
 
-            keystoreSettings.forEach((key, value) -> runKeystoreCommandWithPassword(keystorePassword, value.toString(), "add", "-x", key));
+            keystoreSettings.forEach((key, value) -> runKeystoreCommandWithPassword(keystorePassword, value.toString(), "add", key));
 
             for (Map.Entry<String, File> entry : keystoreFiles.entrySet()) {
                 File file = entry.getValue();
@@ -733,7 +738,12 @@ public class OpenSearchNode implements TestClusterConfiguration {
     }
 
     private void runKeystoreCommandWithPassword(String keystorePassword, String input, CharSequence... args) {
-        final String actualInput = keystorePassword.length() > 0 ? keystorePassword + "\n" + input : input;
+        final String actualInput;
+        if (keystorePassword.length() > 0) {
+            actualInput = keystorePassword + "\n" + input + "\n" + input;
+        } else {
+            actualInput = input + "\n" + input;
+        }
         runOpenSearchBinScriptWithInput(actualInput, "opensearch-keystore", args);
     }
 
@@ -1182,10 +1192,6 @@ public class OpenSearchNode implements TestClusterConfiguration {
         baseConfig.put("indices.breaker.total.use_real_memory", "false");
         // Don't wait for state, just start up quickly. This will also allow new and old nodes in the BWC case to become the master
         baseConfig.put("discovery.initial_state_timeout", "0s");
-
-        // TODO: Remove these once https://github.com/elastic/elasticsearch/issues/46091 is fixed
-        baseConfig.put("logger.org.opensearch.action.support.master", "DEBUG");
-        baseConfig.put("logger.org.opensearch.cluster.coordination", "DEBUG");
 
         HashSet<String> overriden = new HashSet<>(baseConfig.keySet());
         overriden.retainAll(settings.keySet());

@@ -36,12 +36,12 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.RequestValidators;
 import org.opensearch.action.support.ActionFilters;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeAction;
-import org.opensearch.action.support.master.AcknowledgedResponse;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ack.ClusterStateUpdateResponse;
 import org.opensearch.cluster.block.ClusterBlockException;
-import org.opensearch.cluster.block.ClusterBlockLevel;
+import org.opensearch.cluster.block.ClusterBlocks;
 import org.opensearch.cluster.metadata.AliasAction;
 import org.opensearch.cluster.metadata.AliasMetadata;
 import org.opensearch.cluster.metadata.IndexAbstraction;
@@ -50,6 +50,7 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.metadata.MetadataIndexAliasesService;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
+import org.opensearch.common.regex.Regex;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.index.Index;
@@ -59,6 +60,7 @@ import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -121,7 +123,7 @@ public class TransportIndicesAliasesAction extends TransportClusterManagerNodeAc
         for (IndicesAliasesRequest.AliasActions aliasAction : request.aliasActions()) {
             Collections.addAll(indices, aliasAction.indices());
         }
-        return state.blocks().indicesBlockedException(ClusterBlockLevel.METADATA_WRITE, indices.toArray(new String[0]));
+        return ClusterBlocks.indicesWithRemoteSnapshotBlockedException(indices, state);
     }
 
     @Override
@@ -199,7 +201,7 @@ public class TransportIndicesAliasesAction extends TransportClusterManagerNodeAc
         request.aliasActions().clear();
         IndicesAliasesClusterStateUpdateRequest updateRequest = new IndicesAliasesClusterStateUpdateRequest(unmodifiableList(finalActions))
             .ackTimeout(request.timeout())
-            .masterNodeTimeout(request.clusterManagerNodeTimeout());
+            .clusterManagerNodeTimeout(request.clusterManagerNodeTimeout());
 
         indexAliasesService.indicesAliases(updateRequest, new ActionListener<ClusterStateUpdateResponse>() {
             @Override
@@ -220,10 +222,31 @@ public class TransportIndicesAliasesAction extends TransportClusterManagerNodeAc
             // for DELETE we expand the aliases
             String[] indexAsArray = { concreteIndex };
             final Map<String, List<AliasMetadata>> aliasMetadata = metadata.findAliases(action, indexAsArray);
-            List<String> finalAliases = new ArrayList<>();
+            Set<String> finalAliases = new HashSet<>();
             for (final List<AliasMetadata> curAliases : aliasMetadata.values()) {
                 for (AliasMetadata aliasMeta : curAliases) {
                     finalAliases.add(aliasMeta.alias());
+                }
+            }
+
+            // must_exist can only be set in the Remove Action in Update aliases API,
+            // we check the value here to make the behavior consistent with Delete aliases API
+            if (action.mustExist() != null) {
+                // if must_exist is false, we should make the remove action execute silently,
+                // so we return the original specified aliases to avoid AliasesNotFoundException
+                if (!action.mustExist()) {
+                    return action.aliases();
+                }
+
+                // if there is any non-existing aliases specified in the request and must_exist is true, throw exception in advance
+                if (finalAliases.isEmpty()) {
+                    throw new AliasesNotFoundException(action.aliases());
+                }
+                String[] nonExistingAliases = Arrays.stream(action.aliases())
+                    .filter(originalAlias -> finalAliases.stream().noneMatch(finalAlias -> Regex.simpleMatch(originalAlias, finalAlias)))
+                    .toArray(String[]::new);
+                if (nonExistingAliases.length != 0) {
+                    throw new AliasesNotFoundException(nonExistingAliases);
                 }
             }
             return finalAliases.toArray(new String[0]);

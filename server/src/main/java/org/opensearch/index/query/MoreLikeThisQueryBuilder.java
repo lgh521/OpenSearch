@@ -46,7 +46,6 @@ import org.opensearch.action.termvectors.MultiTermVectorsRequest;
 import org.opensearch.action.termvectors.MultiTermVectorsResponse;
 import org.opensearch.action.termvectors.TermVectorsRequest;
 import org.opensearch.action.termvectors.TermVectorsResponse;
-import org.opensearch.client.Client;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.lucene.search.MoreLikeThisQuery;
 import org.opensearch.common.lucene.search.XMoreLikeThis;
@@ -70,6 +69,7 @@ import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper.KeywordFieldType;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.TextFieldMapper.TextFieldType;
+import org.opensearch.transport.client.Client;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -87,7 +87,7 @@ import static org.opensearch.common.xcontent.XContentFactory.jsonBuilder;
 
 /**
  * A more like this query that finds documents that are "like" the provided set of document(s).
- *
+ * <p>
  * The documents are provided as a set of strings and/or a list of {@link Item}.
  *
  * @opensearch.internal

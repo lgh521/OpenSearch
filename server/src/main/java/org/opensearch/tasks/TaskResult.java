@@ -32,8 +32,8 @@
 package org.opensearch.tasks;
 
 import org.opensearch.OpenSearchException;
-import org.opensearch.client.Requests;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.ParseField;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.common.bytes.BytesReference;
@@ -47,6 +47,7 @@ import org.opensearch.core.xcontent.ToXContent;
 import org.opensearch.core.xcontent.ToXContentObject;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.core.xcontent.XContentHelper;
+import org.opensearch.transport.client.Requests;
 
 import java.io.IOException;
 import java.util.Map;
@@ -63,8 +64,9 @@ import static org.opensearch.core.xcontent.ConstructingObjectParser.optionalCons
  * Information about a running task or a task that stored its result. Running tasks just have a {@link #getTask()} while
  * tasks with stored result will have either a {@link #getError()} or {@link #getResponse()}.
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public final class TaskResult implements Writeable, ToXContentObject {
     private final boolean completed;
     private final TaskInfo task;

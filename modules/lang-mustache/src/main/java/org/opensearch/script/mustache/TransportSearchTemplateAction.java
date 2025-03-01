@@ -36,7 +36,6 @@ import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
-import org.opensearch.client.node.NodeClient;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.core.action.ActionListener;
@@ -53,6 +52,7 @@ import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.internal.SearchContext;
 import org.opensearch.tasks.Task;
 import org.opensearch.transport.TransportService;
+import org.opensearch.transport.client.node.NodeClient;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -61,9 +61,9 @@ public class TransportSearchTemplateAction extends HandledTransportAction<Search
 
     private static final String TEMPLATE_LANG = MustacheScriptEngine.NAME;
 
-    private final ScriptService scriptService;
-    private final NamedXContentRegistry xContentRegistry;
-    private final NodeClient client;
+    protected final ScriptService scriptService;
+    protected final NamedXContentRegistry xContentRegistry;
+    protected final NodeClient client;
 
     @Inject
     public TransportSearchTemplateAction(
@@ -74,6 +74,20 @@ public class TransportSearchTemplateAction extends HandledTransportAction<Search
         NodeClient client
     ) {
         super(SearchTemplateAction.NAME, transportService, actionFilters, SearchTemplateRequest::new);
+        this.scriptService = scriptService;
+        this.xContentRegistry = xContentRegistry;
+        this.client = client;
+    }
+
+    public TransportSearchTemplateAction(
+        String actionName,
+        TransportService transportService,
+        ActionFilters actionFilters,
+        ScriptService scriptService,
+        NamedXContentRegistry xContentRegistry,
+        NodeClient client
+    ) {
+        super(actionName, transportService, actionFilters, SearchTemplateRequest::new);
         this.scriptService = scriptService;
         this.xContentRegistry = xContentRegistry;
         this.client = client;

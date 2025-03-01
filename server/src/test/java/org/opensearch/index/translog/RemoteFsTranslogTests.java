@@ -20,16 +20,20 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.RepositoryMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.blobstore.BlobContainer;
+import org.opensearch.common.blobstore.BlobMetadata;
 import org.opensearch.common.blobstore.BlobPath;
 import org.opensearch.common.blobstore.BlobStore;
 import org.opensearch.common.blobstore.fs.FsBlobContainer;
 import org.opensearch.common.blobstore.fs.FsBlobStore;
 import org.opensearch.common.bytes.ReleasableBytesReference;
+import org.opensearch.common.lease.Releasable;
+import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
 import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.core.common.unit.ByteSizeUnit;
 import org.opensearch.core.common.unit.ByteSizeValue;
@@ -47,6 +51,8 @@ import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.translog.transfer.BlobStoreTransferService;
 import org.opensearch.index.translog.transfer.TranslogTransferManager;
 import org.opensearch.index.translog.transfer.TranslogTransferMetadata;
+import org.opensearch.index.translog.transfer.TranslogUploadFailedException;
+import org.opensearch.indices.DefaultRemoteStoreSettings;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.repositories.blobstore.BlobStoreRepository;
@@ -67,6 +73,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -82,7 +89,6 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
@@ -95,7 +101,8 @@ import java.util.zip.CRC32;
 import java.util.zip.CheckedInputStream;
 
 import static org.opensearch.common.util.BigArrays.NON_RECYCLING_INSTANCE;
-import static org.opensearch.index.translog.RemoteFsTranslog.TRANSLOG;
+import static org.opensearch.index.IndexSettings.INDEX_REMOTE_TRANSLOG_KEEP_EXTRA_GEN_SETTING;
+import static org.opensearch.index.remote.RemoteStoreEnums.DataCategory.TRANSLOG;
 import static org.opensearch.index.translog.SnapshotMatchers.containsOperationsInAnyOrder;
 import static org.opensearch.index.translog.TranslogDeletionPolicies.createTranslogDeletionPolicy;
 import static org.hamcrest.Matchers.contains;
@@ -113,22 +120,25 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
     protected final ShardId shardId = new ShardId("index", "_na_", 1);
 
     protected RemoteFsTranslog translog;
-    private AtomicLong globalCheckpoint;
+    protected AtomicLong globalCheckpoint;
     protected Path translogDir;
     // A default primary term is used by translog instances created in this test.
-    private final AtomicLong primaryTerm = new AtomicLong();
-    private final AtomicBoolean primaryMode = new AtomicBoolean(true);
+    protected final AtomicLong primaryTerm = new AtomicLong();
+    protected final AtomicBoolean primaryMode = new AtomicBoolean(true);
     private final AtomicReference<LongConsumer> persistedSeqNoConsumer = new AtomicReference<>();
-    private ThreadPool threadPool;
-    private final static String METADATA_DIR = "metadata";
-    private final static String DATA_DIR = "data";
+    protected ThreadPool threadPool;
+    protected final static String METADATA_DIR = "metadata";
+    protected final static String DATA_DIR = "data";
+    AtomicInteger writeCalls = new AtomicInteger();
     BlobStoreRepository repository;
 
     BlobStoreTransferService blobStoreTransferService;
 
     TestTranslog.FailSwitch fail;
 
-    private LongConsumer getPersistedSeqNoConsumer() {
+    TestTranslog.SlowDownWriteSwitch slowDown;
+
+    protected LongConsumer getPersistedSeqNoConsumer() {
         return seqNo -> {
             final LongConsumer consumer = persistedSeqNoConsumer.get();
             if (consumer != null) {
@@ -159,18 +169,26 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         }
     }
 
-    private RemoteFsTranslog create(Path path) throws IOException {
+    protected RemoteFsTranslog create(Path path) throws IOException {
         final String translogUUID = Translog.createEmptyTranslog(path, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
-        return create(path, createRepository(), translogUUID);
+        return create(path, createRepository(), translogUUID, 0);
     }
 
-    private RemoteFsTranslog create(Path path, BlobStoreRepository repository, String translogUUID) throws IOException {
+    private RemoteFsTranslog create(Path path, BlobStoreRepository repository, String translogUUID, int extraGenToKeep) throws IOException {
         this.repository = repository;
         globalCheckpoint = new AtomicLong(SequenceNumbers.NO_OPS_PERFORMED);
-        final TranslogConfig translogConfig = getTranslogConfig(path);
+        final TranslogConfig translogConfig = getTranslogConfig(path, extraGenToKeep);
         final TranslogDeletionPolicy deletionPolicy = createTranslogDeletionPolicy(translogConfig.getIndexSettings());
         threadPool = new TestThreadPool(getClass().getName());
         blobStoreTransferService = new BlobStoreTransferService(repository.blobStore(), threadPool);
+        return createTranslogInstance(translogConfig, translogUUID, deletionPolicy);
+    }
+
+    protected RemoteFsTranslog createTranslogInstance(
+        TranslogConfig translogConfig,
+        String translogUUID,
+        TranslogDeletionPolicy deletionPolicy
+    ) throws IOException {
         return new RemoteFsTranslog(
             translogConfig,
             translogUUID,
@@ -181,12 +199,20 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             repository,
             threadPool,
             primaryMode::get,
-            new RemoteTranslogTransferTracker(shardId, 10)
+            new RemoteTranslogTransferTracker(shardId, 10),
+            DefaultRemoteStoreSettings.INSTANCE
         );
+    }
 
+    private RemoteFsTranslog create(Path path, BlobStoreRepository repository, String translogUUID) throws IOException {
+        return create(path, repository, translogUUID, 0);
     }
 
     private TranslogConfig getTranslogConfig(final Path path) {
+        return getTranslogConfig(path, 0);
+    }
+
+    private TranslogConfig getTranslogConfig(final Path path, int gensToKeep) {
         final Settings settings = Settings.builder()
             .put(IndexMetadata.SETTING_VERSION_CREATED, org.opensearch.Version.CURRENT)
             // only randomize between nog age retention and a long one, so failures will have a chance of reproducing
@@ -194,6 +220,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             .put(IndexSettings.INDEX_TRANSLOG_RETENTION_SIZE_SETTING.getKey(), randomIntBetween(-1, 2048) + "b")
             .put(IndexMetadata.SETTING_REPLICATION_TYPE, ReplicationType.SEGMENT)
             .put(IndexMetadata.SETTING_REMOTE_STORE_ENABLED, true)
+            .put(INDEX_REMOTE_TRANSLOG_KEEP_EXTRA_GEN_SETTING.getKey(), gensToKeep)
             .build();
         return getTranslogConfig(path, settings);
     }
@@ -204,9 +231,10 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             new ByteSizeValue(8, ByteSizeUnit.KB),
             new ByteSizeValue(10 + randomInt(128 * 1024), ByteSizeUnit.BYTES)
         );
-
-        final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(shardId.getIndex(), settings);
-        return new TranslogConfig(shardId, path, indexSettings, NON_RECYCLING_INSTANCE, bufferSize);
+        // To simulate that the node is remote backed
+        Settings nodeSettings = Settings.builder().put("node.attr.remote_store.translog.repository", "my-repo-1").build();
+        final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(shardId.getIndex(), settings, nodeSettings);
+        return new TranslogConfig(shardId, path, indexSettings, NON_RECYCLING_INSTANCE, bufferSize, "", false);
     }
 
     private BlobStoreRepository createRepository() {
@@ -215,13 +243,15 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         final ClusterService clusterService = BlobStoreTestUtil.mockClusterService(repositoryMetadata);
         fail = new TestTranslog.FailSwitch();
         fail.failNever();
+        slowDown = new TestTranslog.SlowDownWriteSwitch();
         final FsRepository repository = new ThrowingBlobRepository(
             repositoryMetadata,
             createEnvironment(),
             xContentRegistry(),
             clusterService,
             new RecoverySettings(Settings.EMPTY, new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)),
-            fail
+            fail,
+            slowDown
         ) {
             @Override
             protected void assertSnapshotOrGenericThread() {
@@ -257,7 +287,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         return loc;
     }
 
-    private Translog.Location addToTranslogAndListAndUpload(Translog translog, List<Translog.Operation> list, Translog.Operation op)
+    protected Translog.Location addToTranslogAndListAndUpload(Translog translog, List<Translog.Operation> list, Translog.Operation op)
         throws IOException {
         Translog.Location loc = translog.add(op);
         translog.ensureSynced(loc);
@@ -366,6 +396,113 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         try (Translog.Snapshot snapshot = translog.newSnapshot(seqNo + 1, randomLongBetween(seqNo + 1, Long.MAX_VALUE))) {
             assertThat(snapshot, SnapshotMatchers.size(0));
             assertThat(snapshot.totalOperations(), equalTo(0));
+        }
+
+    }
+
+    protected TranslogConfig getConfig(int gensToKeep) {
+        Path tempDir = createTempDir();
+        final TranslogConfig temp = getTranslogConfig(tempDir, gensToKeep);
+        final TranslogConfig config = new TranslogConfig(
+            temp.getShardId(),
+            temp.getTranslogPath(),
+            temp.getIndexSettings(),
+            temp.getBigArrays(),
+            new ByteSizeValue(1, ByteSizeUnit.KB),
+            "",
+            false
+        );
+        return config;
+    }
+
+    protected ChannelFactory getChannelFactory() {
+        writeCalls = new AtomicInteger();
+        final ChannelFactory channelFactory = (file, openOption) -> {
+            FileChannel delegate = FileChannel.open(file, openOption);
+            boolean success = false;
+            try {
+                // don't do partial writes for checkpoints we rely on the fact that the bytes are written as an atomic operation
+                final boolean isCkpFile = file.getFileName().toString().endsWith(".ckp");
+
+                final FileChannel channel;
+                if (isCkpFile) {
+                    channel = delegate;
+                } else {
+                    channel = new FilterFileChannel(delegate) {
+
+                        @Override
+                        public int write(ByteBuffer src) throws IOException {
+                            writeCalls.incrementAndGet();
+                            return super.write(src);
+                        }
+                    };
+                }
+                success = true;
+                return channel;
+            } finally {
+                if (success == false) {
+                    IOUtils.closeWhileHandlingException(delegate);
+                }
+            }
+        };
+        return channelFactory;
+    }
+
+    public void testExtraGenToKeep() throws Exception {
+        TranslogConfig config = getConfig(1);
+        ChannelFactory channelFactory = getChannelFactory();
+        final Set<Long> persistedSeqNos = new HashSet<>();
+        String translogUUID = Translog.createEmptyTranslog(
+            config.getTranslogPath(),
+            SequenceNumbers.NO_OPS_PERFORMED,
+            shardId,
+            channelFactory,
+            primaryTerm.get()
+        );
+        TranslogDeletionPolicy deletionPolicy = createTranslogDeletionPolicy(config.getIndexSettings());
+        ArrayList<Translog.Operation> ops = new ArrayList<>();
+        try (
+            RemoteFsTranslog translog = new RemoteFsTranslog(
+                config,
+                translogUUID,
+                deletionPolicy,
+                () -> SequenceNumbers.NO_OPS_PERFORMED,
+                primaryTerm::get,
+                persistedSeqNos::add,
+                repository,
+                threadPool,
+                () -> Boolean.TRUE,
+                new RemoteTranslogTransferTracker(shardId, 10),
+                DefaultRemoteStoreSettings.INSTANCE
+            ) {
+                @Override
+                ChannelFactory getChannelFactory() {
+                    return channelFactory;
+                }
+            }
+        ) {
+            addToTranslogAndListAndUpload(translog, ops, new Translog.Index("1", 0, primaryTerm.get(), new byte[] { 1 }));
+
+            addToTranslogAndListAndUpload(translog, ops, new Translog.Index("2", 1, primaryTerm.get(), new byte[] { 1 }));
+
+            addToTranslogAndListAndUpload(translog, ops, new Translog.Index("3", 2, primaryTerm.get(), new byte[] { 1 }));
+
+            // expose the new checkpoint (simulating a commit), before we trim the translog
+            translog.setMinSeqNoToKeep(2);
+
+            // Trims from local
+            translog.trimUnreferencedReaders();
+            assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
+
+            addToTranslogAndListAndUpload(translog, ops, new Translog.Index("4", 3, primaryTerm.get(), new byte[] { 1 }));
+
+            // Trims from remote now
+            translog.trimUnreferencedReaders();
+            assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
+            assertEquals(
+                6,
+                blobStoreTransferService.listAll(getTranslogDirectory().add(DATA_DIR).add(String.valueOf(primaryTerm.get()))).size()
+            );
         }
 
     }
@@ -592,6 +729,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         translog.setMinSeqNoToKeep(0);
         // This should not trim anything from local
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
         assertEquals(2, translog.readers.size());
         assertBusy(() -> {
             assertEquals(4, translog.allUploaded().size());
@@ -605,6 +743,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         // This should not trim tlog-2.* files from remote as we not uploading any more translog to remote
         translog.setMinSeqNoToKeep(1);
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
         assertEquals(1, translog.readers.size());
         assertBusy(() -> {
             assertEquals(4, translog.allUploaded().size());
@@ -617,13 +756,21 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         // this should now trim as tlog-2 files from remote, but not tlog-3 and tlog-4
         addToTranslogAndListAndUpload(translog, ops, new Translog.Index("2", 2, primaryTerm.get(), new byte[] { 1 }));
         assertEquals(2, translog.stats().estimatedNumberOfOperations());
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
 
         translog.setMinSeqNoToKeep(2);
-
+        // this should now trim as tlog-2 files from remote, but not tlog-3 and tlog-4
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
         assertEquals(1, translog.readers.size());
         assertEquals(1, translog.stats().estimatedNumberOfOperations());
-        assertBusy(() -> assertEquals(4, translog.allUploaded().size()));
+        assertBusy(() -> {
+            assertEquals(4, translog.allUploaded().size());
+            assertEquals(
+                4,
+                blobStoreTransferService.listAll(getTranslogDirectory().add(DATA_DIR).add(String.valueOf(primaryTerm.get()))).size()
+            );
+        });
     }
 
     public void testMetadataFileDeletion() throws Exception {
@@ -634,6 +781,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             addToTranslogAndListAndUpload(translog, ops, new Translog.Index(String.valueOf(i), i, primaryTerm.get(), new byte[] { 1 }));
             translog.setMinSeqNoToKeep(i);
             translog.trimUnreferencedReaders();
+            assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
             assertEquals(1, translog.readers.size());
         }
         assertBusy(() -> assertEquals(4, translog.allUploaded().size()));
@@ -644,6 +792,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             addToTranslogAndListAndUpload(translog, ops, new Translog.Index(String.valueOf(i), i, primaryTerm.get(), new byte[] { 1 }));
         }
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
         assertEquals(1 + moreDocs, translog.readers.size());
         assertBusy(() -> assertEquals(2 + 2L * moreDocs, translog.allUploaded().size()));
         assertBusy(() -> assertEquals(1, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size()));
@@ -651,6 +800,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         int totalDocs = numDocs + moreDocs;
         translog.setMinSeqNoToKeep(totalDocs - 1);
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
 
         addToTranslogAndListAndUpload(
             translog,
@@ -659,6 +809,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         );
         translog.setMinSeqNoToKeep(totalDocs);
         translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
         assertBusy(() -> assertEquals(1, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size()));
 
         // Change primary term and test the deletion of older primaries
@@ -692,8 +843,84 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         }
     }
 
-    private BlobPath getTranslogDirectory() {
-        return repository.basePath().add(shardId.getIndex().getUUID()).add(String.valueOf(shardId.id())).add(TRANSLOG);
+    public void testDrainSync() throws Exception {
+        // This test checks following scenarios -
+        // 1. During ongoing uploads, the available permits are 0.
+        // 2. During an upload, if drainSync is called, it will wait for it to acquire and available permits are 0.
+        // 3. After drainSync, if trimUnreferencedReaders is attempted, we do not delete from remote store.
+        // 4. After drainSync, if an upload is an attempted, we do not upload to remote store.
+        ArrayList<Translog.Operation> ops = new ArrayList<>();
+        assertEquals(0, translog.allUploaded().size());
+        assertEquals(1, translog.readers.size());
+
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index(String.valueOf(0), 0, primaryTerm.get(), new byte[] { 1 }));
+        assertEquals(4, translog.allUploaded().size());
+        assertEquals(2, translog.readers.size());
+        assertBusy(() -> assertEquals(1, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size()));
+
+        translog.setMinSeqNoToKeep(0);
+        translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
+        assertEquals(1, translog.readers.size());
+
+        // Case 1 - During ongoing uploads, the available permits are 0.
+        slowDown.setSleepSeconds(2);
+        CountDownLatch latch = new CountDownLatch(1);
+        Thread thread1 = new Thread(() -> {
+            try {
+                addToTranslogAndListAndUpload(translog, ops, new Translog.Index(String.valueOf(1), 1, primaryTerm.get(), new byte[] { 1 }));
+                assertEquals(2, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size());
+                latch.countDown();
+            } catch (IOException e) {
+                throw new AssertionError(e);
+            }
+        });
+        thread1.start();
+        assertBusy(() -> assertEquals(0, translog.availablePermits()));
+        // Case 2 - During an upload, if drainSync is called, it will wait for it to acquire and available permits are 0.
+        Releasable releasable = translog.drainSync();
+        assertBusy(() -> assertEquals(0, latch.getCount()));
+        assertEquals(0, translog.availablePermits());
+        slowDown.setSleepSeconds(0);
+        assertEquals(6, translog.allUploaded().size());
+        assertEquals(2, translog.readers.size());
+        Set<String> mdFiles = blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR));
+
+        // Case 3 - After drainSync, if trimUnreferencedReaders is attempted, we do not delete from remote store.
+        translog.setMinSeqNoToKeep(1);
+        translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
+        assertEquals(1, translog.readers.size());
+        assertEquals(6, translog.allUploaded().size());
+        assertEquals(mdFiles, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)));
+
+        // Case 4 - After drainSync, if an upload is an attempted, we do not upload to remote store.
+        Translog.Location loc = addToTranslogAndListAndUpload(
+            translog,
+            ops,
+            new Translog.Index(String.valueOf(2), 2, primaryTerm.get(), new byte[] { 1 })
+        );
+        assertEquals(1, translog.readers.size());
+        assertEquals(6, translog.allUploaded().size());
+        assertEquals(mdFiles, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)));
+
+        // Refill the permits back
+        Releasables.close(releasable);
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index(String.valueOf(3), 3, primaryTerm.get(), new byte[] { 1 }));
+        assertEquals(2, translog.readers.size());
+        assertEquals(8, translog.allUploaded().size());
+        assertEquals(3, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size());
+
+        translog.setMinSeqNoToKeep(3);
+        translog.trimUnreferencedReaders();
+        assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
+        assertEquals(1, translog.readers.size());
+        assertBusy(() -> assertEquals(4, translog.allUploaded().size()));
+        assertBusy(() -> assertEquals(1, blobStoreTransferService.listAll(getTranslogDirectory().add(METADATA_DIR)).size()));
+    }
+
+    protected BlobPath getTranslogDirectory() {
+        return repository.basePath().add(shardId.getIndex().getUUID()).add(String.valueOf(shardId.id())).add(TRANSLOG.getName());
     }
 
     private Long populateTranslogOps(boolean withMissingOps) throws IOException {
@@ -843,7 +1070,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             final int threadId = i;
             writers[i] = new Thread(new AbstractRunnable() {
                 @Override
-                public void doRun() throws BrokenBarrierException, InterruptedException, IOException {
+                public void doRun() throws Exception {
                     barrier.await();
                     int counter = 0;
                     while (run.get() && idGenerator.get() < maxOps) {
@@ -885,6 +1112,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
                                 // deletionPolicy.setLocalCheckpointOfSafeCommit(localCheckpoint);
                                 translog.setMinSeqNoToKeep(localCheckpoint + 1);
                                 translog.trimUnreferencedReaders();
+                                assertBusy(() -> assertTrue(translog.isRemoteGenerationDeletionPermitsAvailable()));
                             }
                         }
                         if (id % 7 == 0) {
@@ -1048,7 +1276,7 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         }
     }
 
-    public void testSyncUpFailure() throws IOException {
+    public void testSyncUpLocationFailure() throws IOException {
         int translogOperations = randomIntBetween(1, 20);
         int count = 0;
         fail.failAlways();
@@ -1098,6 +1326,26 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         assertTrue(statsTracker.getTotalUploadsSucceeded() > 0);
         assertTrue(statsTracker.getLastSuccessfulUploadTimestamp() > 0);
         assertDownloadStatsNoDownloads(statsTracker);
+    }
+
+    public void testSyncUpAlwaysFailure() throws IOException {
+        int translogOperations = randomIntBetween(1, 20);
+        int count = 0;
+        fail.failAlways();
+        for (int op = 0; op < translogOperations; op++) {
+            translog.add(
+                new Translog.Index(String.valueOf(op), count, primaryTerm.get(), Integer.toString(count).getBytes(StandardCharsets.UTF_8))
+            );
+            try {
+                translog.sync();
+                fail("io exception expected");
+            } catch (TranslogUploadFailedException e) {
+                assertTrue("at least one operation pending", translog.syncNeeded());
+            }
+        }
+        assertTrue(translog.isOpen());
+        fail.failNever();
+        translog.sync();
     }
 
     public void testSyncUpToStream() throws IOException {
@@ -1250,48 +1498,10 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
     }
 
     public void testTranslogWriterCanFlushInAddOrReadCall() throws IOException {
-        Path tempDir = createTempDir();
-        final TranslogConfig temp = getTranslogConfig(tempDir);
-        final TranslogConfig config = new TranslogConfig(
-            temp.getShardId(),
-            temp.getTranslogPath(),
-            temp.getIndexSettings(),
-            temp.getBigArrays(),
-            new ByteSizeValue(1, ByteSizeUnit.KB)
-        );
-
+        final TranslogConfig config = getConfig(1);
         final Set<Long> persistedSeqNos = new HashSet<>();
-        final AtomicInteger writeCalls = new AtomicInteger();
-
-        final ChannelFactory channelFactory = (file, openOption) -> {
-            FileChannel delegate = FileChannel.open(file, openOption);
-            boolean success = false;
-            try {
-                // don't do partial writes for checkpoints we rely on the fact that the bytes are written as an atomic operation
-                final boolean isCkpFile = file.getFileName().toString().endsWith(".ckp");
-
-                final FileChannel channel;
-                if (isCkpFile) {
-                    channel = delegate;
-                } else {
-                    channel = new FilterFileChannel(delegate) {
-
-                        @Override
-                        public int write(ByteBuffer src) throws IOException {
-                            writeCalls.incrementAndGet();
-                            return super.write(src);
-                        }
-                    };
-                }
-                success = true;
-                return channel;
-            } finally {
-                if (success == false) {
-                    IOUtils.closeWhileHandlingException(delegate);
-                }
-            }
-        };
-
+        writeCalls = new AtomicInteger();
+        final ChannelFactory channelFactory = getChannelFactory();
         String translogUUID = Translog.createEmptyTranslog(
             config.getTranslogPath(),
             SequenceNumbers.NO_OPS_PERFORMED,
@@ -1311,7 +1521,8 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
                 repository,
                 threadPool,
                 () -> Boolean.TRUE,
-                new RemoteTranslogTransferTracker(shardId, 10)
+                new RemoteTranslogTransferTracker(shardId, 10),
+                DefaultRemoteStoreSettings.INSTANCE
             ) {
                 @Override
                 ChannelFactory getChannelFactory() {
@@ -1359,7 +1570,9 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             temp.getTranslogPath(),
             temp.getIndexSettings(),
             temp.getBigArrays(),
-            new ByteSizeValue(1, ByteSizeUnit.KB)
+            new ByteSizeValue(1, ByteSizeUnit.KB),
+            "",
+            false
         );
 
         final Set<Long> persistedSeqNos = new HashSet<>();
@@ -1418,7 +1631,8 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
                 repository,
                 threadPool,
                 () -> Boolean.TRUE,
-                new RemoteTranslogTransferTracker(shardId, 10)
+                new RemoteTranslogTransferTracker(shardId, 10),
+                DefaultRemoteStoreSettings.INSTANCE
             ) {
                 @Override
                 ChannelFactory getChannelFactory() {
@@ -1483,13 +1697,13 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
 
         TranslogTransferManager mockTransfer = mock(TranslogTransferManager.class);
         RemoteTranslogTransferTracker remoteTranslogTransferTracker = mock(RemoteTranslogTransferTracker.class);
-        when(mockTransfer.readMetadata()).thenReturn(translogTransferMetadata);
+        when(mockTransfer.readMetadata(0)).thenReturn(translogTransferMetadata);
         when(mockTransfer.getRemoteTranslogTransferTracker()).thenReturn(remoteTranslogTransferTracker);
 
         // Always File not found
         when(mockTransfer.downloadTranslog(any(), any(), any())).thenThrow(new NoSuchFileException("File not found"));
         TranslogTransferManager finalMockTransfer = mockTransfer;
-        assertThrows(NoSuchFileException.class, () -> RemoteFsTranslog.download(finalMockTransfer, location, logger));
+        assertThrows(NoSuchFileException.class, () -> RemoteFsTranslog.download(finalMockTransfer, location, logger, false, 0));
 
         // File not found in first attempt . File found in second attempt.
         mockTransfer = mock(TranslogTransferManager.class);
@@ -1510,13 +1724,167 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
         }).when(mockTransfer).downloadTranslog(any(), any(), any());
 
         // no exception thrown
-        RemoteFsTranslog.download(mockTransfer, location, logger);
+        RemoteFsTranslog.download(mockTransfer, location, logger, false, 0);
+    }
+
+    // No translog data in local as well as remote, we skip creating empty translog
+    public void testDownloadWithNoTranslogInLocalAndRemote() throws IOException {
+        Path location = createTempDir();
+
+        TranslogTransferManager mockTransfer = mock(TranslogTransferManager.class);
+        RemoteTranslogTransferTracker remoteTranslogTransferTracker = mock(RemoteTranslogTransferTracker.class);
+        when(mockTransfer.readMetadata()).thenReturn(null);
+        when(mockTransfer.getRemoteTranslogTransferTracker()).thenReturn(remoteTranslogTransferTracker);
+
+        Path[] filesBeforeDownload = FileSystemUtils.files(location);
+        RemoteFsTranslog.download(mockTransfer, location, logger, false, 0);
+        assertEquals(filesBeforeDownload, FileSystemUtils.files(location));
+    }
+
+    // No translog data in remote but non-empty translog is present in local. In this case, we delete all the files
+    // from local file system and create empty translog
+    public void testDownloadWithTranslogOnlyInLocal() throws IOException {
+        TranslogTransferManager mockTransfer = mock(TranslogTransferManager.class);
+        RemoteTranslogTransferTracker remoteTranslogTransferTracker = mock(RemoteTranslogTransferTracker.class);
+        when(mockTransfer.readMetadata()).thenReturn(null);
+        when(mockTransfer.getRemoteTranslogTransferTracker()).thenReturn(remoteTranslogTransferTracker);
+
+        Path location = createTempDir();
+        for (Path file : FileSystemUtils.files(translogDir)) {
+            Files.copy(file, location.resolve(file.getFileName()));
+        }
+
+        Checkpoint existingCheckpoint = Translog.readCheckpoint(location);
+
+        TranslogTransferManager finalMockTransfer = mockTransfer;
+        RemoteFsTranslog.download(finalMockTransfer, location, logger, false, 0);
+
+        Path[] filesPostDownload = FileSystemUtils.files(location);
+        assertEquals(2, filesPostDownload.length);
+        assertTrue(
+            filesPostDownload[0].getFileName().toString().contains("translog.ckp")
+                || filesPostDownload[1].getFileName().toString().contains("translog.ckp")
+        );
+
+        Checkpoint newEmptyTranslogCheckpoint = Translog.readCheckpoint(location);
+        // Verify that the new checkpoint points to empty translog
+        assertTrue(
+            newEmptyTranslogCheckpoint.generation == newEmptyTranslogCheckpoint.minTranslogGeneration
+                && newEmptyTranslogCheckpoint.minSeqNo == SequenceNumbers.NO_OPS_PERFORMED
+                && newEmptyTranslogCheckpoint.maxSeqNo == SequenceNumbers.NO_OPS_PERFORMED
+                && newEmptyTranslogCheckpoint.numOps == 0
+        );
+        assertTrue(newEmptyTranslogCheckpoint.generation > existingCheckpoint.generation);
+        assertEquals(newEmptyTranslogCheckpoint.globalCheckpoint, existingCheckpoint.globalCheckpoint);
+    }
+
+    // No translog data in remote and empty translog in local. We skip creating another empty translog
+    public void testDownloadWithEmptyTranslogOnlyInLocal() throws IOException {
+        TranslogTransferManager mockTransfer = mock(TranslogTransferManager.class);
+        RemoteTranslogTransferTracker remoteTranslogTransferTracker = mock(RemoteTranslogTransferTracker.class);
+        when(mockTransfer.readMetadata()).thenReturn(null);
+        when(mockTransfer.getRemoteTranslogTransferTracker()).thenReturn(remoteTranslogTransferTracker);
+
+        Path location = createTempDir();
+        for (Path file : FileSystemUtils.files(translogDir)) {
+            Files.copy(file, location.resolve(file.getFileName()));
+        }
+
+        TranslogTransferManager finalMockTransfer = mockTransfer;
+
+        // download first time will ensure creating empty translog
+        RemoteFsTranslog.download(finalMockTransfer, location, logger, false, 0);
+        Path[] filesPostFirstDownload = FileSystemUtils.files(location);
+
+        // download on empty translog should be a no-op
+        RemoteFsTranslog.download(finalMockTransfer, location, logger, false, 0);
+        Path[] filesPostSecondDownload = FileSystemUtils.files(location);
+
+        assertArrayEquals(filesPostFirstDownload, filesPostSecondDownload);
+    }
+
+    public void testSyncWithGlobalCheckpointUpdate() throws IOException {
+        ArrayList<Translog.Operation> ops = new ArrayList<>();
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index("1", 0, primaryTerm.get(), new byte[] { 1 }));
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index("2", 1, primaryTerm.get(), new byte[] { 2 }));
+
+        // Set a global checkpoint
+        long initialGlobalCheckpoint = 1L;
+        globalCheckpoint.set(initialGlobalCheckpoint);
+
+        // Sync the translog
+        translog.sync();
+
+        // Verify that the globalCheckpointSynced is updated
+        assertEquals(initialGlobalCheckpoint, ((RemoteFsTranslog) translog).getLastSyncedCheckpoint().globalCheckpoint);
+
+        // Update global checkpoint
+        long newGlobalCheckpoint = 2L;
+        globalCheckpoint.set(newGlobalCheckpoint);
+
+        // Add a new operation and sync
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index("3", 2, primaryTerm.get(), new byte[] { 3 }));
+        translog.sync();
+
+        // Verify that the globalCheckpointSynced is updated to the new value
+        assertEquals(newGlobalCheckpoint, ((RemoteFsTranslog) translog).getLastSyncedCheckpoint().globalCheckpoint);
+    }
+
+    public void testSyncNeededWithGlobalCheckpointUpdate() throws IOException {
+        ArrayList<Translog.Operation> ops = new ArrayList<>();
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index("1", 0, primaryTerm.get(), new byte[] { 1 }));
+
+        // Set initial global checkpoint
+        long initialGlobalCheckpoint = 0L;
+        globalCheckpoint.set(initialGlobalCheckpoint);
+
+        // Sync the translog
+        translog.sync();
+
+        // Verify that sync is not needed
+        assertFalse(translog.syncNeeded());
+
+        // Update global checkpoint
+        long newGlobalCheckpoint = 1L;
+        globalCheckpoint.set(newGlobalCheckpoint);
+
+        // Verify that sync is now needed due to global checkpoint update
+        assertTrue(translog.syncNeeded());
+
+        // Sync again
+        translog.sync();
+
+        // Verify that sync is not needed after syncing
+        assertFalse(translog.syncNeeded());
+    }
+
+    public void testGlobalCheckpointUpdateDuringClose() throws IOException {
+        ArrayList<Translog.Operation> ops = new ArrayList<>();
+        addToTranslogAndListAndUpload(translog, ops, new Translog.Index("1", 0, primaryTerm.get(), new byte[] { 1 }));
+
+        // Set initial global checkpoint
+        long initialGlobalCheckpoint = 0L;
+        globalCheckpoint.set(initialGlobalCheckpoint);
+
+        // Sync the translog
+        translog.sync();
+
+        // Update global checkpoint
+        long newGlobalCheckpoint = 1L;
+        globalCheckpoint.set(newGlobalCheckpoint);
+
+        // Close the translog
+        translog.close();
+
+        // Verify that the last synced checkpoint includes the updated global checkpoint
+        assertEquals(newGlobalCheckpoint, ((RemoteFsTranslog) translog).getLastSyncedCheckpoint().globalCheckpoint);
     }
 
     public class ThrowingBlobRepository extends FsRepository {
-        private final Environment environment;
 
-        private TestTranslog.FailSwitch fail;
+        private final Environment environment;
+        private final TestTranslog.FailSwitch fail;
+        private final TestTranslog.SlowDownWriteSwitch slowDown;
 
         public ThrowingBlobRepository(
             RepositoryMetadata metadata,
@@ -1524,33 +1892,43 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
             NamedXContentRegistry namedXContentRegistry,
             ClusterService clusterService,
             RecoverySettings recoverySettings,
-            TestTranslog.FailSwitch fail
+            TestTranslog.FailSwitch fail,
+            TestTranslog.SlowDownWriteSwitch slowDown
         ) {
             super(metadata, environment, namedXContentRegistry, clusterService, recoverySettings);
             this.environment = environment;
             this.fail = fail;
+            this.slowDown = slowDown;
         }
 
         protected BlobStore createBlobStore() throws Exception {
             final String location = REPOSITORIES_LOCATION_SETTING.get(getMetadata().settings());
             final Path locationFile = environment.resolveRepoFile(location);
-            return new ThrowingBlobStore(bufferSize, locationFile, isReadOnly(), fail);
+            return new ThrowingBlobStore(bufferSize, locationFile, isReadOnly(), fail, slowDown);
         }
     }
 
     private class ThrowingBlobStore extends FsBlobStore {
 
-        private TestTranslog.FailSwitch fail;
+        private final TestTranslog.FailSwitch fail;
+        private final TestTranslog.SlowDownWriteSwitch slowDown;
 
-        public ThrowingBlobStore(int bufferSizeInBytes, Path path, boolean readonly, TestTranslog.FailSwitch fail) throws IOException {
+        public ThrowingBlobStore(
+            int bufferSizeInBytes,
+            Path path,
+            boolean readonly,
+            TestTranslog.FailSwitch fail,
+            TestTranslog.SlowDownWriteSwitch slowDown
+        ) throws IOException {
             super(bufferSizeInBytes, path, readonly);
             this.fail = fail;
+            this.slowDown = slowDown;
         }
 
         @Override
         public BlobContainer blobContainer(BlobPath path) {
             try {
-                return new ThrowingBlobContainer(this, path, buildAndCreate(path), fail);
+                return new ThrowingBlobContainer(this, path, buildAndCreate(path), fail, slowDown);
             } catch (IOException ex) {
                 throw new OpenSearchException("failed to create blob container", ex);
             }
@@ -1560,18 +1938,56 @@ public class RemoteFsTranslogTests extends OpenSearchTestCase {
     private class ThrowingBlobContainer extends FsBlobContainer {
 
         private TestTranslog.FailSwitch fail;
+        private final TestTranslog.SlowDownWriteSwitch slowDown;
 
-        public ThrowingBlobContainer(FsBlobStore blobStore, BlobPath blobPath, Path path, TestTranslog.FailSwitch fail) {
+        public ThrowingBlobContainer(
+            FsBlobStore blobStore,
+            BlobPath blobPath,
+            Path path,
+            TestTranslog.FailSwitch fail,
+            TestTranslog.SlowDownWriteSwitch slowDown
+        ) {
             super(blobStore, blobPath, path);
             this.fail = fail;
+            this.slowDown = slowDown;
         }
 
+        @Override
         public void writeBlobAtomic(final String blobName, final InputStream inputStream, final long blobSize, boolean failIfAlreadyExists)
             throws IOException {
             if (fail.fail()) {
                 throw new IOException("blob container throwing error");
             }
+            if (slowDown.getSleepSeconds() > 0) {
+                try {
+                    Thread.sleep(slowDown.getSleepSeconds() * 1000L);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
             super.writeBlobAtomic(blobName, inputStream, blobSize, failIfAlreadyExists);
+        }
+
+        @Override
+        public void listBlobsByPrefixInSortedOrder(
+            String blobNamePrefix,
+            int limit,
+            BlobNameSortOrder blobNameSortOrder,
+            ActionListener<List<BlobMetadata>> listener
+        ) {
+            if (fail.fail()) {
+                listener.onFailure(new RuntimeException("blob container throwing error"));
+                return;
+            }
+            if (slowDown.getSleepSeconds() > 0) {
+                try {
+                    Thread.sleep(slowDown.getSleepSeconds() * 1000L);
+                } catch (InterruptedException e) {
+                    listener.onFailure(new RuntimeException(e));
+                    return;
+                }
+            }
+            super.listBlobsByPrefixInSortedOrder(blobNamePrefix, limit, blobNameSortOrder, listener);
         }
     }
 

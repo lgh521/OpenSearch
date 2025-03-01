@@ -32,17 +32,19 @@
 
 package org.opensearch.action.admin.cluster.storedscripts;
 
-import org.opensearch.action.support.master.AcknowledgedRequestBuilder;
-import org.opensearch.action.support.master.AcknowledgedResponse;
-import org.opensearch.client.OpenSearchClient;
+import org.opensearch.action.support.clustermanager.AcknowledgedRequestBuilder;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.xcontent.MediaType;
+import org.opensearch.transport.client.OpenSearchClient;
 
 /**
  * Transport request builder for putting stored script
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class PutStoredScriptRequestBuilder extends AcknowledgedRequestBuilder<
     PutStoredScriptRequest,
     AcknowledgedResponse,

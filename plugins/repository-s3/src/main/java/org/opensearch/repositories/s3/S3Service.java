@@ -42,6 +42,7 @@ import software.amazon.awssdk.core.SdkSystemSetting;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.core.exception.SdkException;
+import software.amazon.awssdk.core.retry.RetryMode;
 import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.core.retry.backoff.BackoffStrategy;
 import software.amazon.awssdk.http.SystemPropertyTlsKeyManagersProvider;
@@ -90,6 +91,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static java.util.Collections.emptyMap;
 
@@ -100,7 +102,7 @@ class S3Service implements Closeable {
 
     private static final String DEFAULT_S3_ENDPOINT = "s3.amazonaws.com";
 
-    private volatile Map<S3ClientSettings, AmazonS3Reference> clientsCache = emptyMap();
+    private volatile Map<S3ClientSettings, AmazonS3Reference> clientsCache = new ConcurrentHashMap<>();
 
     /**
      * Client settings calculated from static configuration and settings in the keystore.
@@ -111,7 +113,7 @@ class S3Service implements Closeable {
      * Client settings derived from those in {@link #staticClientSettings} by combining them with settings
      * in the {@link RepositoryMetadata}.
      */
-    private volatile Map<Settings, S3ClientSettings> derivedClientSettings = emptyMap();
+    private volatile Map<Settings, S3ClientSettings> derivedClientSettings = new ConcurrentHashMap<>();
 
     S3Service(final Path configPath) {
         staticClientSettings = MapBuilder.<String, S3ClientSettings>newMapBuilder()
@@ -278,6 +280,8 @@ class S3Service implements Closeable {
         }
 
         clientBuilder.socketTimeout(Duration.ofMillis(clientSettings.readTimeoutMillis));
+        clientBuilder.maxConnections(clientSettings.maxSyncConnections);
+        clientBuilder.connectionAcquisitionTimeout(Duration.ofMillis(clientSettings.connectionAcquisitionTimeoutMillis));
 
         return clientBuilder;
     }
@@ -327,6 +331,8 @@ class S3Service implements Closeable {
         );
         if (!clientSettings.throttleRetries) {
             retryPolicy.throttlingBackoffStrategy(BackoffStrategy.none());
+        } else {
+            retryPolicy.throttlingBackoffStrategy(BackoffStrategy.defaultThrottlingStrategy(RetryMode.STANDARD));
         }
         return clientOverrideConfiguration.retryPolicy(retryPolicy.build()).build();
     }
@@ -437,7 +443,7 @@ class S3Service implements Closeable {
         return new IrsaCredentials(webIdentityTokenFile, roleArn, roleSessionName);
     }
 
-    private synchronized void releaseCachedClients() {
+    public synchronized void releaseCachedClients() {
         // the clients will shutdown when they will not be used anymore
         for (final AmazonS3Reference clientReference : clientsCache.values()) {
             clientReference.decRef();

@@ -54,6 +54,7 @@ import org.opensearch.core.common.io.stream.Writeable.Writer;
 import org.opensearch.core.common.settings.SecureString;
 import org.opensearch.core.common.text.Text;
 import org.opensearch.core.concurrency.OpenSearchRejectedExecutionException;
+import org.opensearch.semver.SemverRange;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
@@ -88,7 +89,7 @@ import java.util.function.IntFunction;
 
 /**
  * A stream from another node to this node. Technically, it can also be streamed from a byte array but that is mostly for testing.
- *
+ * <p>
  * This class's methods are optimized so you can put the methods that read and write a class next to each other and you can scan them
  * visually for differences. That means that most variables should be read and written in a single line so even large objects fit both
  * reading and writing on the screen. It also means that the methods on this class are named very similarly to {@link StreamInput}. Finally
@@ -632,7 +633,7 @@ public abstract class StreamOutput extends OutputStream {
      * @param keyWriter The key writer
      * @param valueWriter The value writer
      */
-    public final <K, V> void writeMap(final Map<K, V> map, final Writer<K> keyWriter, final Writer<V> valueWriter) throws IOException {
+    public <K, V> void writeMap(final Map<K, V> map, final Writer<K> keyWriter, final Writer<V> valueWriter) throws IOException {
         writeVInt(map.size());
         for (final Map.Entry<K, V> entry : map.entrySet()) {
             keyWriter.write(this, entry.getKey());
@@ -783,6 +784,10 @@ public abstract class StreamOutput extends OutputStream {
         writers.put(BigInteger.class, (o, v) -> {
             o.writeByte((byte) 26);
             o.writeString(v.toString());
+        });
+        writers.put(SemverRange.class, (o, v) -> {
+            o.writeByte((byte) 27);
+            o.writeSemverRange((SemverRange) v);
         });
         WRITERS = Collections.unmodifiableMap(writers);
     }
@@ -964,9 +969,13 @@ public abstract class StreamOutput extends OutputStream {
     }
 
     public void writeOptionalWriteable(@Nullable Writeable writeable) throws IOException {
+        writeOptionalWriteable((out, writable) -> writable.writeTo(out), writeable);
+    }
+
+    public <T extends Writeable> void writeOptionalWriteable(final Writer<T> writer, @Nullable T writeable) throws IOException {
         if (writeable != null) {
             writeBoolean(true);
-            writeable.writeTo(this);
+            writer.write(this, writeable);
         } else {
             writeBoolean(false);
         }
@@ -1099,6 +1108,10 @@ public abstract class StreamOutput extends OutputStream {
     /** Writes the OpenSearch {@link Version} to the output stream */
     public void writeVersion(final Version version) throws IOException {
         writeVInt(version.id);
+    }
+
+    public void writeSemverRange(final SemverRange range) throws IOException {
+        writeString(range.toString());
     }
 
     /** Writes the OpenSearch {@link Build} informn to the output stream */

@@ -12,7 +12,6 @@ import org.apache.lucene.search.TotalHits;
 import org.opensearch.Version;
 import org.opensearch.action.LatchedActionListener;
 import org.opensearch.action.StepListener;
-import org.opensearch.client.node.NodeClient;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
@@ -39,6 +38,7 @@ import org.opensearch.threadpool.TestThreadPool;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.RemoteClusterConnectionTests;
 import org.opensearch.transport.Transport;
+import org.opensearch.transport.client.node.NodeClient;
 import org.junit.Before;
 
 import java.util.ArrayList;
@@ -339,8 +339,8 @@ public class CreatePitControllerTests extends OpenSearchTestCase {
                 createListener.onFailure(new Exception("Exception occurred in phase 1"));
                 latch.await();
                 assertEquals(0, updateNodesInvoked.size());
-                /**
-                 * cleanup is not called on create pit phase one failure
+                /*
+                  cleanup is not called on create pit phase one failure
                  */
                 assertEquals(0, deleteNodesInvoked.size());
             }
@@ -438,8 +438,8 @@ public class CreatePitControllerTests extends OpenSearchTestCase {
                 createListener.onResponse(searchResponse);
                 latch.await();
                 assertEquals(3, updateNodesInvoked.size());
-                /**
-                 * check if cleanup is called for all nodes in case of update pit failure
+                /*
+                  check if cleanup is called for all nodes in case of update pit failure
                  */
                 assertEquals(3, deleteNodesInvoked.size());
             }
@@ -526,8 +526,8 @@ public class CreatePitControllerTests extends OpenSearchTestCase {
                 createListener.onResponse(searchResponse);
                 latch.await();
                 assertEquals(3, updateNodesInvoked.size());
-                /**
-                 * check if cleanup is called for all nodes in case of update pit failure
+                /*
+                  check if cleanup is called for all nodes in case of update pit failure
                  */
                 assertEquals(3, deleteNodesInvoked.size());
             }

@@ -37,7 +37,9 @@ import org.apache.lucene.util.ArrayUtil;
 import org.opensearch.OpenSearchException;
 import org.opensearch.common.LocalTimeOffset.Gap;
 import org.opensearch.common.LocalTimeOffset.Overlap;
-import org.opensearch.common.annotation.InternalApi;
+import org.opensearch.common.annotation.PublicApi;
+import org.opensearch.common.round.Roundable;
+import org.opensearch.common.round.RoundableFactory;
 import org.opensearch.common.time.DateUtils;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -52,6 +54,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.IsoFields;
@@ -59,10 +62,10 @@ import java.time.temporal.TemporalField;
 import java.time.temporal.TemporalQueries;
 import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneRules;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -76,21 +79,23 @@ import java.util.concurrent.TimeUnit;
  * blog for some background reading. Its super interesting and the links are
  * a comedy gold mine. If you like time zones. Or hate them.
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public abstract class Rounding implements Writeable {
     private static final Logger logger = LogManager.getLogger(Rounding.class);
 
     /**
      * A Date Time Unit
      *
-     * @opensearch.internal
+     * @opensearch.api
      */
+    @PublicApi(since = "1.0.0")
     public enum DateTimeUnit {
         WEEK_OF_WEEKYEAR((byte) 1, "week", IsoFields.WEEK_OF_WEEK_BASED_YEAR, true, TimeUnit.DAYS.toMillis(7)) {
             private final long extraLocalOffsetLookup = TimeUnit.DAYS.toMillis(7);
 
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundWeekOfWeekYear(utcMillis);
             }
 
@@ -102,7 +107,7 @@ public abstract class Rounding implements Writeable {
         YEAR_OF_CENTURY((byte) 2, "year", ChronoField.YEAR_OF_ERA, false, 12) {
             private final long extraLocalOffsetLookup = TimeUnit.DAYS.toMillis(366);
 
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundYear(utcMillis);
             }
 
@@ -113,7 +118,7 @@ public abstract class Rounding implements Writeable {
         QUARTER_OF_YEAR((byte) 3, "quarter", IsoFields.QUARTER_OF_YEAR, false, 3) {
             private final long extraLocalOffsetLookup = TimeUnit.DAYS.toMillis(92);
 
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundQuarterOfYear(utcMillis);
             }
 
@@ -124,7 +129,7 @@ public abstract class Rounding implements Writeable {
         MONTH_OF_YEAR((byte) 4, "month", ChronoField.MONTH_OF_YEAR, false, 1) {
             private final long extraLocalOffsetLookup = TimeUnit.DAYS.toMillis(31);
 
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundMonthOfYear(utcMillis);
             }
 
@@ -133,7 +138,7 @@ public abstract class Rounding implements Writeable {
             }
         },
         DAY_OF_MONTH((byte) 5, "day", ChronoField.DAY_OF_MONTH, true, ChronoField.DAY_OF_MONTH.getBaseUnit().getDuration().toMillis()) {
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundFloor(utcMillis, this.ratio);
             }
 
@@ -142,7 +147,7 @@ public abstract class Rounding implements Writeable {
             }
         },
         HOUR_OF_DAY((byte) 6, "hour", ChronoField.HOUR_OF_DAY, true, ChronoField.HOUR_OF_DAY.getBaseUnit().getDuration().toMillis()) {
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundFloor(utcMillis, ratio);
             }
 
@@ -157,7 +162,7 @@ public abstract class Rounding implements Writeable {
             true,
             ChronoField.MINUTE_OF_HOUR.getBaseUnit().getDuration().toMillis()
         ) {
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundFloor(utcMillis, ratio);
             }
 
@@ -172,11 +177,11 @@ public abstract class Rounding implements Writeable {
             true,
             ChronoField.SECOND_OF_MINUTE.getBaseUnit().getDuration().toMillis()
         ) {
-            long roundFloor(long utcMillis) {
+            public long roundFloor(long utcMillis) {
                 return DateUtils.roundFloor(utcMillis, ratio);
             }
 
-            long extraLocalOffsetLookup() {
+            public long extraLocalOffsetLookup() {
                 return ratio;
             }
         };
@@ -205,7 +210,7 @@ public abstract class Rounding implements Writeable {
          * @param utcMillis the milliseconds since the epoch
          * @return          the rounded down milliseconds since the epoch
          */
-        abstract long roundFloor(long utcMillis);
+        public abstract long roundFloor(long utcMillis);
 
         /**
          * When looking up {@link LocalTimeOffset} go this many milliseconds
@@ -265,11 +270,16 @@ public abstract class Rounding implements Writeable {
 
     public abstract byte id();
 
+    public DateTimeUnit unit() {
+        return null;
+    }
+
     /**
      * A strategy for rounding milliseconds since epoch.
      *
-     * @opensearch.internal
+     * @opensearch.api
      */
+    @PublicApi(since = "1.0.0")
     public interface Prepared {
         /**
          * Rounds the given value.
@@ -359,8 +369,9 @@ public abstract class Rounding implements Writeable {
     /**
      * Builder for rounding
      *
-     * @opensearch.internal
+     * @opensearch.api
      */
+    @PublicApi(since = "1.0.0")
     public static class Builder {
 
         private final DateTimeUnit unit;
@@ -422,13 +433,6 @@ public abstract class Rounding implements Writeable {
         private static final int DEFAULT_ARRAY_ROUNDING_MAX_THRESHOLD = 128;
 
         /**
-         * The maximum limit up to which linear search is used, otherwise binary search is used.
-         * This is because linear search is much faster on small arrays.
-         * Benchmark results: <a href="https://github.com/opensearch-project/OpenSearch/pull/9727">PR #9727</a>
-         */
-        private static final int LINEAR_SEARCH_ARRAY_ROUNDING_MAX_THRESHOLD = 64;
-
-        /**
          * Attempt to build a {@link Prepared} implementation that relies on pre-calcuated
          * "round down" points. If there would be more than {@code max} points then return
          * the original implementation, otherwise return the new, faster implementation.
@@ -451,9 +455,36 @@ public abstract class Rounding implements Writeable {
                 values = ArrayUtil.grow(values, i + 1);
                 values[i++] = rounded;
             }
-            return i <= LINEAR_SEARCH_ARRAY_ROUNDING_MAX_THRESHOLD
-                ? new BidirectionalLinearSearchArrayRounding(values, i, this)
-                : new BinarySearchArrayRounding(values, i, this);
+            return new ArrayRounding(RoundableFactory.create(values, i), this);
+        }
+    }
+
+    /**
+     * ArrayRounding is an implementation of {@link Prepared} which uses
+     * pre-calculated round-down points to speed up lookups.
+     */
+    private static class ArrayRounding implements Prepared {
+        private final Roundable roundable;
+        private final Prepared delegate;
+
+        public ArrayRounding(Roundable roundable, Prepared delegate) {
+            this.roundable = roundable;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public long round(long utcMillis) {
+            return roundable.floor(utcMillis);
+        }
+
+        @Override
+        public long nextRoundingValue(long utcMillis) {
+            return delegate.nextRoundingValue(utcMillis);
+        }
+
+        @Override
+        public double roundingSize(long utcMillis, DateTimeUnit timeUnit) {
+            return delegate.roundingSize(utcMillis, timeUnit);
         }
     }
 
@@ -488,6 +519,11 @@ public abstract class Rounding implements Writeable {
         @Override
         public byte id() {
             return ID;
+        }
+
+        @Override
+        public DateTimeUnit unit() {
+            return unit;
         }
 
         private LocalDateTime truncateLocalDateTime(LocalDateTime localDateTime) {
@@ -630,6 +666,11 @@ public abstract class Rounding implements Writeable {
         @Override
         public String toString() {
             return "Rounding[" + unit + " in " + timeZone + "]";
+        }
+
+        @Override
+        public boolean isUTC() {
+            return "Z".equals(timeZone.getDisplayName(TextStyle.FULL, Locale.ENGLISH));
         }
 
         private abstract class TimeUnitPreparedRounding extends PreparedRounding {
@@ -1009,6 +1050,11 @@ public abstract class Rounding implements Writeable {
             return "Rounding[" + interval + " in " + timeZone + "]";
         }
 
+        @Override
+        public boolean isUTC() {
+            return "Z".equals(timeZone.getDisplayName(TextStyle.FULL, Locale.ENGLISH));
+        }
+
         private long roundKey(long value, long interval) {
             if (value < 0) {
                 return (value - interval + 1) / interval;
@@ -1328,6 +1374,11 @@ public abstract class Rounding implements Writeable {
         public String toString() {
             return delegate + " offset by " + offset;
         }
+
+        @Override
+        public boolean isUTC() {
+            return delegate.isUTC();
+        }
     }
 
     public static Rounding read(StreamInput in) throws IOException {
@@ -1345,106 +1396,28 @@ public abstract class Rounding implements Writeable {
     }
 
     /**
-     * Implementation of {@link Prepared} using pre-calculated "round down" points.
-     *
-     * <p>
-     * It uses binary search to find the greatest round-down point less than or equal to the given timestamp.
-     *
-     * @opensearch.internal
+     * Extracts the interval value from the {@link Rounding} instance
+     * @param rounding {@link Rounding} instance
+     * @return the interval value from the {@link Rounding} instance or {@code OptionalLong.empty()}
+     * if the interval is not available
      */
-    @InternalApi
-    static class BinarySearchArrayRounding implements Prepared {
-        private final long[] values;
-        private final int max;
-        private final Prepared delegate;
+    public static OptionalLong getInterval(Rounding rounding) {
+        long interval = 0;
 
-        BinarySearchArrayRounding(long[] values, int max, Prepared delegate) {
-            assert max > 0 : "at least one round-down point must be present";
-            this.values = values;
-            this.max = max;
-            this.delegate = delegate;
+        if (rounding instanceof TimeUnitRounding) {
+            interval = (((TimeUnitRounding) rounding).unit).extraLocalOffsetLookup();
+        } else if (rounding instanceof TimeIntervalRounding) {
+            interval = ((TimeIntervalRounding) rounding).interval;
+        } else {
+            return OptionalLong.empty();
         }
 
-        @Override
-        public long round(long utcMillis) {
-            assert values[0] <= utcMillis : "utcMillis must be after " + values[0];
-            int idx = Arrays.binarySearch(values, 0, max, utcMillis);
-            assert idx != -1 : "The insertion point is before the array! This should have tripped the assertion above.";
-            assert -1 - idx <= values.length : "This insertion point is after the end of the array.";
-            if (idx < 0) {
-                idx = -2 - idx;
-            }
-            return values[idx];
-        }
-
-        @Override
-        public long nextRoundingValue(long utcMillis) {
-            return delegate.nextRoundingValue(utcMillis);
-        }
-
-        @Override
-        public double roundingSize(long utcMillis, DateTimeUnit timeUnit) {
-            return delegate.roundingSize(utcMillis, timeUnit);
-        }
+        return OptionalLong.of(interval);
     }
 
     /**
-     * Implementation of {@link Prepared} using pre-calculated "round down" points.
-     *
-     * <p>
-     * It uses linear search to find the greatest round-down point less than or equal to the given timestamp.
-     * For small inputs (&le; 64 elements), this can be much faster than binary search as it avoids the penalty of
-     * branch mispredictions and pipeline stalls, and accesses memory sequentially.
-     *
-     * <p>
-     * It uses "meet in the middle" linear search to avoid the worst case scenario when the desired element is present
-     * at either side of the array. This is helpful for time-series data where velocity increases over time, so more
-     * documents are likely to find a greater timestamp which is likely to be present on the right end of the array.
-     *
-     * @opensearch.internal
+     * Helper function for checking if the time zone requested for date histogram
+     * aggregation is utc or not
      */
-    @InternalApi
-    static class BidirectionalLinearSearchArrayRounding implements Prepared {
-        private final long[] ascending;
-        private final long[] descending;
-        private final Prepared delegate;
-
-        BidirectionalLinearSearchArrayRounding(long[] values, int max, Prepared delegate) {
-            assert max > 0 : "at least one round-down point must be present";
-            this.delegate = delegate;
-            int len = (max + 1) >>> 1; // rounded-up to handle odd number of values
-            ascending = new long[len];
-            descending = new long[len];
-
-            for (int i = 0; i < len; i++) {
-                ascending[i] = values[i];
-                descending[i] = values[max - i - 1];
-            }
-        }
-
-        @Override
-        public long round(long utcMillis) {
-            int i = 0;
-            for (; i < ascending.length; i++) {
-                if (descending[i] <= utcMillis) {
-                    return descending[i];
-                }
-                if (ascending[i] > utcMillis) {
-                    assert i > 0 : "utcMillis must be after " + ascending[0];
-                    return ascending[i - 1];
-                }
-            }
-            return ascending[i - 1];
-        }
-
-        @Override
-        public long nextRoundingValue(long utcMillis) {
-            return delegate.nextRoundingValue(utcMillis);
-        }
-
-        @Override
-        public double roundingSize(long utcMillis, DateTimeUnit timeUnit) {
-            return delegate.roundingSize(utcMillis, timeUnit);
-        }
-    }
+    public abstract boolean isUTC();
 }

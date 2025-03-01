@@ -40,7 +40,6 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.filter.RegexFilter;
-import org.apache.lucene.codecs.LiveDocsFormat;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.LongPoint;
@@ -79,6 +78,7 @@ import org.apache.lucene.search.TotalHitCountCollector;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.Lock;
+import org.apache.lucene.tests.index.ForceMergePolicy;
 import org.apache.lucene.tests.mockfile.ExtrasFS;
 import org.apache.lucene.tests.store.MockDirectoryWrapper;
 import org.apache.lucene.util.Bits;
@@ -153,6 +153,7 @@ import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicyFactory;
 import org.opensearch.index.translog.TranslogException;
 import org.opensearch.index.translog.listener.TranslogEventListener;
+import org.opensearch.test.DummyShardLock;
 import org.opensearch.test.IndexSettingsModule;
 import org.opensearch.test.MockLogAppender;
 import org.opensearch.test.VersionUtils;
@@ -233,7 +234,6 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -271,7 +271,7 @@ public class InternalEngineTests extends EngineTestCase {
         try (Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL)) {
             assertEquals(1, searcher.getIndexReader().numDocs());
             TopDocs search = searcher.search(new MatchAllDocsQuery(), 1);
-            org.apache.lucene.document.Document luceneDoc = searcher.doc(search.scoreDocs[0].doc);
+            org.apache.lucene.document.Document luceneDoc = searcher.storedFields().document(search.scoreDocs[0].doc);
             assertEquals("test", luceneDoc.get("value"));
         }
 
@@ -284,7 +284,7 @@ public class InternalEngineTests extends EngineTestCase {
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             assertEquals(1, searcher.getIndexReader().numDocs());
             TopDocs search = searcher.search(new MatchAllDocsQuery(), 1);
-            org.apache.lucene.document.Document luceneDoc = searcher.doc(search.scoreDocs[0].doc);
+            org.apache.lucene.document.Document luceneDoc = searcher.storedFields().document(search.scoreDocs[0].doc);
             assertEquals("updated", luceneDoc.get("value"));
         }
 
@@ -339,6 +339,58 @@ public class InternalEngineTests extends EngineTestCase {
 
             segments = engine.segments(true);
             assertThat(segments.size(), equalTo(3));
+        }
+    }
+
+    public void testSegmentsWithUseCompoundFileFlag_true() throws IOException {
+        try (Store store = createStore(); Engine engine = createEngine(defaultSettings, store, createTempDir(), new TieredMergePolicy())) {
+            ParsedDocument doc = testParsedDocument("1", null, testDocument(), B_1, null);
+            Engine.Index index = indexForDoc(doc);
+            engine.index(index);
+            engine.flush();
+            final List<Segment> segments = engine.segments(false);
+            assertThat(segments, hasSize(1));
+            assertTrue(segments.get(0).compound);
+            boolean cfeCompoundFileFound = false;
+            boolean cfsCompoundFileFound = false;
+            for (final String fileName : store.readLastCommittedSegmentsInfo().files(true)) {
+                if (fileName.endsWith(".cfe")) {
+                    cfeCompoundFileFound = true;
+                }
+                if (fileName.endsWith(".cfs")) {
+                    cfsCompoundFileFound = true;
+                }
+            }
+            Assert.assertTrue(cfeCompoundFileFound);
+            Assert.assertTrue(cfsCompoundFileFound);
+        }
+    }
+
+    public void testSegmentsWithUseCompoundFileFlag_false() throws IOException {
+        final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(
+            "test",
+            Settings.builder().put(defaultSettings.getSettings()).put(EngineConfig.INDEX_USE_COMPOUND_FILE.getKey(), false).build()
+        );
+        try (Store store = createStore(); Engine engine = createEngine(indexSettings, store, createTempDir(), new TieredMergePolicy())) {
+            ParsedDocument doc = testParsedDocument("1", null, testDocument(), B_1, null);
+            Engine.Index index = indexForDoc(doc);
+            engine.index(index);
+            engine.flush();
+            final List<Segment> segments = engine.segments(false);
+            assertThat(segments, hasSize(1));
+            assertFalse(segments.get(0).compound);
+            boolean cfeCompoundFileFound = false;
+            boolean cfsCompoundFileFound = false;
+            for (final String fileName : store.readLastCommittedSegmentsInfo().files(true)) {
+                if (fileName.endsWith(".cfe")) {
+                    cfeCompoundFileFound = true;
+                }
+                if (fileName.endsWith(".cfs")) {
+                    cfsCompoundFileFound = true;
+                }
+            }
+            Assert.assertFalse(cfeCompoundFileFound);
+            Assert.assertFalse(cfsCompoundFileFound);
         }
     }
 
@@ -680,7 +732,7 @@ public class InternalEngineTests extends EngineTestCase {
             engine.refresh("test");
 
             segments = engine.segments(true);
-            assertThat(segments.size(), equalTo(2));
+            assertThat(segments.size(), equalTo(1));
         }
     }
 
@@ -952,7 +1004,7 @@ public class InternalEngineTests extends EngineTestCase {
             recoveringEngine.refresh("test");
             try (Engine.Searcher searcher = recoveringEngine.acquireSearcher("test")) {
                 TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), docs);
-                assertEquals(docs, topDocs.totalHits.value);
+                assertEquals(docs, topDocs.totalHits.value());
             }
         } finally {
             IOUtils.close(initialEngine, recoveringEngine, store);
@@ -1029,6 +1081,55 @@ public class InternalEngineTests extends EngineTestCase {
         getThread.join();
         assertTrue(latestGetResult.get().exists());
         latestGetResult.get().close();
+    }
+
+    public void testUpdateOperationForAppendOnlyIndex() throws Exception {
+        Settings.Builder settings = Settings.builder()
+            .put(defaultSettings.getSettings())
+            .put(IndexMetadata.INDEX_APPEND_ONLY_ENABLED_SETTING.getKey(), "true");
+        final IndexMetadata indexMetadata = IndexMetadata.builder(defaultSettings.getIndexMetadata()).settings(settings).build();
+        final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(indexMetadata);
+        final AtomicLong globalCheckpoint = new AtomicLong(SequenceNumbers.NO_OPS_PERFORMED);
+        try (
+            Store store = createStore();
+            InternalEngine engine = createUpdateOnlyEngine(
+                config(indexSettings, store, createTempDir(), newMergePolicy(), null, null, globalCheckpoint::get)
+            )
+        ) {
+            engine.refresh("warm_up");
+            Engine.Searcher searchResult = engine.acquireSearcher("test");
+            searchResult.close();
+
+            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = engine::acquireSearcher;
+
+            // create a document
+            Document document = testDocumentWithTextField();
+            document.add(new Field(SourceFieldMapper.NAME, BytesReference.toBytes(B_1), SourceFieldMapper.Defaults.FIELD_TYPE));
+            ParsedDocument doc = testParsedDocument("1", null, document, B_1, null);
+            expectThrows(AlreadyClosedException.class, () -> engine.index(indexForDoc(doc)));
+        }
+    }
+
+    private InternalEngine createUpdateOnlyEngine(EngineConfig config) throws IOException {
+        final Store store = config.getStore();
+        final Directory directory = store.directory();
+        if (Lucene.indexExists(directory) == false) {
+            store.createEmpty(config.getIndexSettings().getIndexVersionCreated().luceneVersion);
+            final String translogUuid = Translog.createEmptyTranslog(
+                config.getTranslogConfig().getTranslogPath(),
+                SequenceNumbers.NO_OPS_PERFORMED,
+                shardId,
+                primaryTerm.get()
+            );
+            store.associateIndexWithNewTranslog(translogUuid);
+        }
+
+        return new InternalEngine(config) {
+            @Override
+            protected IndexingStrategy indexingStrategyForOperation(Index index) throws IOException {
+                return IndexingStrategy.processNormally(false, 0, 0);
+            }
+        };
     }
 
     public void testSimpleOperations() throws Exception {
@@ -1820,7 +1921,7 @@ public class InternalEngineTests extends EngineTestCase {
         try (
             Store store = createStore();
             InternalEngine engine = createEngine(
-                config(indexSettings, store, createTempDir(), newMergePolicy(), null, null, globalCheckpoint::get)
+                config(indexSettings, store, createTempDir(), newMergePolicy(random(), false), null, null, globalCheckpoint::get)
             )
         ) {
             int numDocs = scaledRandomIntBetween(10, 100);
@@ -3238,22 +3339,10 @@ public class InternalEngineTests extends EngineTestCase {
         MockDirectoryWrapper wrapper = newMockDirectory();
         final CountDownLatch cleanupCompleted = new CountDownLatch(1);
         MockDirectoryWrapper.Failure fail = new MockDirectoryWrapper.Failure() {
-            public boolean didFail1;
-            public boolean didFail2;
-
             @Override
             public void eval(MockDirectoryWrapper dir) throws IOException {
-                if (!doFail) {
-                    return;
-                }
-
-                // Fail segment merge with diskfull during merging terms.
-                if (callStackContainsAnyOf("mergeTerms") && !didFail1) {
-                    didFail1 = true;
-                    throw new IOException("No space left on device");
-                }
-                if (callStackContains(LiveDocsFormat.class, "writeLiveDocs") && !didFail2) {
-                    didFail2 = true;
+                // Fail segment merge with diskfull during merging terms
+                if (callStackContainsAnyOf("mergeTerms")) {
                     throw new IOException("No space left on device");
                 }
             }
@@ -3292,12 +3381,15 @@ public class InternalEngineTests extends EngineTestCase {
             final AtomicReference<RetentionLeases> retentionLeasesHolder = new AtomicReference<>(
                 new RetentionLeases(primaryTerm, retentionLeasesVersion.get(), Collections.emptyList())
             );
+
+            // Just allow force merge so that regular merge does not close the shard first before any any other operation
+            //
             InternalEngine engine = createEngine(
                 config(
                     defaultSettings,
                     store,
                     createTempDir(),
-                    newMergePolicy(),
+                    newForceMergePolicy(),
                     null,
                     null,
                     null,
@@ -3326,7 +3418,6 @@ public class InternalEngineTests extends EngineTestCase {
             segments = engine.segments(false);
             assertThat(segments.size(), equalTo(2));
 
-            fail.setDoFail();
             // IndexWriter can throw either IOException or IllegalStateException depending on whether tragedy is set or not.
             expectThrowsAnyOf(
                 Arrays.asList(IOException.class, IllegalStateException.class),
@@ -3334,6 +3425,9 @@ public class InternalEngineTests extends EngineTestCase {
             );
 
             assertTrue(cleanupCompleted.await(10, TimeUnit.SECONDS));
+            // Cleanup count will be incremented whenever cleanup is performed correctly.
+            long unreferencedFileCleanUpsPerformed = engine.unreferencedFileCleanUpsPerformed();
+            assertThat(unreferencedFileCleanUpsPerformed, equalTo(1L));
         } catch (Exception ex) {
             throw new AssertionError(ex);
         }
@@ -3343,20 +3437,10 @@ public class InternalEngineTests extends EngineTestCase {
         MockDirectoryWrapper wrapper = newMockDirectory();
         final CountDownLatch cleanupCompleted = new CountDownLatch(1);
         MockDirectoryWrapper.Failure fail = new MockDirectoryWrapper.Failure() {
-            public boolean didFail1;
-            public boolean didFail2;
 
             @Override
             public void eval(MockDirectoryWrapper dir) throws IOException {
-                if (!doFail) {
-                    return;
-                }
-                if (callStackContainsAnyOf("mergeTerms") && !didFail1) {
-                    didFail1 = true;
-                    throw new IOException("No space left on device");
-                }
-                if (callStackContains(LiveDocsFormat.class, "writeLiveDocs") && !didFail2) {
-                    didFail2 = true;
+                if (callStackContainsAnyOf("mergeTerms")) {
                     throw new IOException("No space left on device");
                 }
             }
@@ -3399,7 +3483,7 @@ public class InternalEngineTests extends EngineTestCase {
                     defaultSettings,
                     store,
                     createTempDir(),
-                    newMergePolicy(),
+                    newForceMergePolicy(),
                     null,
                     null,
                     null,
@@ -3437,7 +3521,6 @@ public class InternalEngineTests extends EngineTestCase {
             segments = engine.segments(false);
             assertThat(segments.size(), equalTo(2));
 
-            fail.setDoFail();
             // IndexWriter can throw either IOException or IllegalStateException depending on whether tragedy is set or not.
             expectThrowsAnyOf(
                 Arrays.asList(IOException.class, IllegalStateException.class),
@@ -3445,6 +3528,9 @@ public class InternalEngineTests extends EngineTestCase {
             );
 
             assertTrue(cleanupCompleted.await(10, TimeUnit.SECONDS));
+            // Cleanup count will not be incremented whenever cleanup is disabled.
+            long unreferencedFileCleanUpsPerformed = engine.unreferencedFileCleanUpsPerformed();
+            assertThat(unreferencedFileCleanUpsPerformed, equalTo(0L));
         } catch (Exception ex) {
             throw new AssertionError(ex);
         }
@@ -3454,20 +3540,10 @@ public class InternalEngineTests extends EngineTestCase {
         MockDirectoryWrapper wrapper = newMockDirectory();
         final CountDownLatch cleanupCompleted = new CountDownLatch(1);
         MockDirectoryWrapper.Failure fail = new MockDirectoryWrapper.Failure() {
-            public boolean didFail1;
-            public boolean didFail2;
 
             @Override
             public void eval(MockDirectoryWrapper dir) throws IOException {
-                if (!doFail) {
-                    return;
-                }
-                if (callStackContainsAnyOf("mergeTerms") && !didFail1) {
-                    didFail1 = true;
-                    throw new IOException("No space left on device");
-                }
-                if (callStackContains(LiveDocsFormat.class, "writeLiveDocs") && !didFail2) {
-                    didFail2 = true;
+                if (callStackContainsAnyOf("mergeTerms")) {
                     throw new IOException("No space left on device");
                 }
             }
@@ -3476,7 +3552,8 @@ public class InternalEngineTests extends EngineTestCase {
         wrapper.failOn(fail);
         MockLogAppender mockAppender = MockLogAppender.createForLoggers(Loggers.getLogger(Engine.class, shardId));
         try {
-            Store store = createStore(wrapper);
+            // Create a store where directory is closed during unreferenced file cleanup.
+            Store store = createFailingDirectoryStore(wrapper);
             final Engine.EventListener eventListener = new Engine.EventListener() {
                 @Override
                 public void onFailedEngine(String reason, Exception e) {
@@ -3503,7 +3580,7 @@ public class InternalEngineTests extends EngineTestCase {
                     defaultSettings,
                     store,
                     createTempDir(),
-                    newMergePolicy(),
+                    newForceMergePolicy(),
                     null,
                     null,
                     null,
@@ -3532,7 +3609,6 @@ public class InternalEngineTests extends EngineTestCase {
             segments = engine.segments(false);
             assertThat(segments.size(), equalTo(2));
 
-            fail.setDoFail();
             // Close the store so that unreferenced file cleanup will fail.
             store.close();
 
@@ -3549,6 +3625,9 @@ public class InternalEngineTests extends EngineTestCase {
             );
 
             assertTrue(cleanupCompleted.await(10, TimeUnit.SECONDS));
+            // Cleanup count will not be incremented whenever there is some issue with cleanup.
+            long unreferencedFileCleanUpsPerformed = engine.unreferencedFileCleanUpsPerformed();
+            assertThat(unreferencedFileCleanUpsPerformed, equalTo(0L));
         } catch (Exception ex) {
             throw new AssertionError(ex);
         }
@@ -3560,6 +3639,33 @@ public class InternalEngineTests extends EngineTestCase {
 
         assertEquals(engine.config().getCodec().getName(), codecService.codec(codecName).getName());
         assertEquals(currentIndexWriterConfig.getCodec().getName(), codecService.codec(codecName).getName());
+    }
+
+    /**
+     * Creates a merge policy which only supports force merge.
+     * @return returns a merge policy which only supports force merge.
+     */
+    private MergePolicy newForceMergePolicy() {
+        return new ForceMergePolicy(new TieredMergePolicy());
+    }
+
+    /**
+     * Create a store where directory is closed when referenced while unreferenced file cleanup.
+     *
+     * @param directory directory used for creating the store.
+     * @return a store where directory is closed when referenced while unreferenced file cleanup.
+     */
+    private Store createFailingDirectoryStore(final Directory directory) {
+        return new Store(shardId, INDEX_SETTINGS, directory, new DummyShardLock(shardId)) {
+            @Override
+            public Directory directory() {
+                if (callStackContainsAnyOf("cleanUpUnreferencedFiles")) {
+                    throw new AlreadyClosedException("store is already closed");
+                }
+
+                return super.directory();
+            }
+        };
     }
 
     public void testCurrentTranslogUUIIDIsCommitted() throws IOException {
@@ -3852,7 +3958,7 @@ public class InternalEngineTests extends EngineTestCase {
             engine.translogManager().skipTranslogRecovery();
             try (Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL)) {
                 TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), randomIntBetween(numDocs, numDocs + 10));
-                assertThat(topDocs.totalHits.value, equalTo(0L));
+                assertThat(topDocs.totalHits.value(), equalTo(0L));
             }
         }
     }
@@ -3943,7 +4049,7 @@ public class InternalEngineTests extends EngineTestCase {
         assertThat(result.getVersion(), equalTo(2L));
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), numDocs + 1);
-            assertThat(topDocs.totalHits.value, equalTo(numDocs + 1L));
+            assertThat(topDocs.totalHits.value(), equalTo(numDocs + 1L));
         }
 
         engine.close();
@@ -3952,7 +4058,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("warm_up");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), numDocs + 1);
-            assertThat(topDocs.totalHits.value, equalTo(numDocs + 1L));
+            assertThat(topDocs.totalHits.value(), equalTo(numDocs + 1L));
         }
         assertEquals(flush ? 1 : 2, translogHandler.appliedOperations());
         engine.delete(new Engine.Delete(Integer.toString(randomId), newUid(doc), primaryTerm.get()));
@@ -3963,7 +4069,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), numDocs);
-            assertThat(topDocs.totalHits.value, equalTo((long) numDocs));
+            assertThat(topDocs.totalHits.value(), equalTo((long) numDocs));
         }
     }
 
@@ -3997,7 +4103,7 @@ public class InternalEngineTests extends EngineTestCase {
         final Path badTranslogLog = createTempDir();
         final String badUUID = Translog.createEmptyTranslog(badTranslogLog, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
         Translog translog = new LocalTranslog(
-            new TranslogConfig(shardId, badTranslogLog, INDEX_SETTINGS, BigArrays.NON_RECYCLING_INSTANCE),
+            new TranslogConfig(shardId, badTranslogLog, INDEX_SETTINGS, BigArrays.NON_RECYCLING_INSTANCE, "", false),
             badUUID,
             createTranslogDeletionPolicy(INDEX_SETTINGS),
             () -> SequenceNumbers.NO_OPS_PERFORMED,
@@ -4014,7 +4120,9 @@ public class InternalEngineTests extends EngineTestCase {
             shardId,
             translog.location(),
             config.getIndexSettings(),
-            BigArrays.NON_RECYCLING_INSTANCE
+            BigArrays.NON_RECYCLING_INSTANCE,
+            "",
+            false
         );
 
         EngineConfig brokenConfig = new EngineConfig.Builder().shardId(shardId)
@@ -4384,7 +4492,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
         operation = appendOnlyPrimary(doc, false, 1, create);
         retry = appendOnlyPrimary(doc, true, 1, create);
@@ -4419,7 +4527,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
     }
 
@@ -4477,7 +4585,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(0, topDocs.totalHits.value);
+            assertEquals(0, topDocs.totalHits.value());
         }
     }
 
@@ -4501,7 +4609,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
 
         final boolean create = randomBoolean();
@@ -4541,7 +4649,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
     }
 
@@ -4586,12 +4694,12 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
         if (engine.engineConfig.getIndexSettings().isSoftDeleteEnabled()) {
             List<Translog.Operation> ops = readAllOperationsInLucene(engine);
@@ -4666,7 +4774,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
 
         index = new Engine.Index(
@@ -4688,7 +4796,7 @@ public class InternalEngineTests extends EngineTestCase {
         replicaEngine.refresh("test");
         try (Engine.Searcher searcher = replicaEngine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
     }
 
@@ -4758,7 +4866,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.refresh("test");
         try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
 
         Engine.Index secondIndexRequestReplica = new Engine.Index(
@@ -4779,7 +4887,7 @@ public class InternalEngineTests extends EngineTestCase {
         replicaEngine.refresh("test");
         try (Engine.Searcher searcher = replicaEngine.acquireSearcher("test")) {
             TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
-            assertEquals(1, topDocs.totalHits.value);
+            assertEquals(1, topDocs.totalHits.value());
         }
     }
 
@@ -6218,7 +6326,7 @@ public class InternalEngineTests extends EngineTestCase {
         try (Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL)) {
             TopDocs search = searcher.search(new MatchAllDocsQuery(), searcher.getIndexReader().numDocs());
             for (int i = 0; i < search.scoreDocs.length; i++) {
-                org.apache.lucene.document.Document luceneDoc = searcher.doc(search.scoreDocs[i].doc);
+                org.apache.lucene.document.Document luceneDoc = searcher.storedFields().document(search.scoreDocs[i].doc);
                 assertEquals("updated", luceneDoc.get("value"));
             }
             int totalNumDocs = numDocs - numDeletes.get();
@@ -7235,7 +7343,7 @@ public class InternalEngineTests extends EngineTestCase {
                 engine.refresh("test");
                 try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
                     LeafReader leafReader = getOnlyLeafReader(searcher.getIndexReader());
-                    assertEquals(createdVersion.luceneVersion.major, leafReader.getMetaData().getCreatedVersionMajor());
+                    assertEquals(createdVersion.luceneVersion.major, leafReader.getMetaData().createdVersionMajor());
                 }
             }
         }
@@ -7247,7 +7355,11 @@ public class InternalEngineTests extends EngineTestCase {
             engine.ensureOpen();
             while (running.get()
                 && assertAndGetInternalTranslogManager(engine.translogManager()).getTranslog().currentFileGeneration() < 500) {
-                engine.translogManager().rollTranslogGeneration(); // make adding operations to translog slower
+                try {
+                    engine.translogManager().rollTranslogGeneration(); // make adding operations to translog slower
+                } catch (IOException e) {
+                    fail("io exception not expected");
+                }
             }
         });
         rollTranslog.start();
@@ -7703,7 +7815,9 @@ public class InternalEngineTests extends EngineTestCase {
                 config.getTranslogConfig().getShardId(),
                 createTempDir(),
                 config.getTranslogConfig().getIndexSettings(),
-                config.getTranslogConfig().getBigArrays()
+                config.getTranslogConfig().getBigArrays(),
+                "",
+                false
             );
             EngineConfig configWithWarmer = new EngineConfig.Builder().shardId(config.getShardId())
                 .threadPool(config.getThreadPool())
@@ -7823,7 +7937,9 @@ public class InternalEngineTests extends EngineTestCase {
                     assertNotNull(result.getFailure());
                     assertThat(
                         result.getFailure().getMessage(),
-                        containsString("Number of documents in the index can't exceed [" + maxDocs + "]")
+                        containsString(
+                            "Number of documents in shard " + shardId + " exceeds the limit of [" + maxDocs + "] documents per shard"
+                        )
                     );
                     assertThat(result.getSeqNo(), equalTo(UNASSIGNED_SEQ_NO));
                     assertThat(engine.getLocalCheckpointTracker().getMaxSeqNo(), equalTo(maxSeqNo));

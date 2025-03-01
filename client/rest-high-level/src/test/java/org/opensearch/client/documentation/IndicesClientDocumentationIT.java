@@ -61,7 +61,7 @@ import org.opensearch.action.admin.indices.validate.query.ValidateQueryRequest;
 import org.opensearch.action.admin.indices.validate.query.ValidateQueryResponse;
 import org.opensearch.action.support.ActiveShardCount;
 import org.opensearch.action.support.IndicesOptions;
-import org.opensearch.action.support.master.AcknowledgedResponse;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.client.GetAliasesResponse;
 import org.opensearch.client.OpenSearchRestHighLevelClientTestCase;
 import org.opensearch.client.RequestOptions;
@@ -137,15 +137,15 @@ import static org.hamcrest.Matchers.nullValue;
  * You need to wrap your code between two tags like:
  * // tag::example
  * // end::example
- *
+ * <p>
  * Where example is your tag name.
- *
+ * <p>
  * Then in the documentation, you can extract what is between tag and end tags with
  * ["source","java",subs="attributes,callouts,macros"]
  * --------------------------------------------------
  * include-tagged::{doc-tests}/IndicesClientDocumentationIT.java[example]
  * --------------------------------------------------
- *
+ * <p>
  * The column width of the code block is 84. If the code contains a line longer
  * than 84, the line will be cut and a horizontal scroll bar will be displayed.
  * (the code indentation of the tag is not included in the width)

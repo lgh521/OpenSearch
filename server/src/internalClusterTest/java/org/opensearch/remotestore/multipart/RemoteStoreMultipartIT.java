@@ -8,7 +8,6 @@
 
 package org.opensearch.remotestore.multipart;
 
-import org.opensearch.client.Client;
 import org.opensearch.cluster.metadata.RepositoryMetadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.settings.Settings;
@@ -19,6 +18,7 @@ import org.opensearch.remotestore.RemoteStoreIT;
 import org.opensearch.remotestore.multipart.mocks.MockFsRepositoryPlugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.repositories.blobstore.BlobStoreRepository;
+import org.opensearch.transport.client.Client;
 import org.junit.Before;
 
 import java.nio.file.Path;
@@ -31,7 +31,6 @@ import java.util.stream.Stream;
 
 import static org.opensearch.node.remotestore.RemoteStoreNodeAttribute.REMOTE_STORE_REPOSITORY_SETTINGS_ATTRIBUTE_KEY_PREFIX;
 import static org.opensearch.node.remotestore.RemoteStoreNodeAttribute.REMOTE_STORE_REPOSITORY_TYPE_ATTRIBUTE_KEY_FORMAT;
-import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 
@@ -46,8 +45,26 @@ public class RemoteStoreMultipartIT extends RemoteStoreIT {
         return Stream.concat(super.nodePlugins().stream(), Stream.of(MockFsRepositoryPlugin.class)).collect(Collectors.toList());
     }
 
+    @Override
+    protected Settings nodeSettings(int nodeOrdinal) {
+        return Settings.builder()
+            .put(super.nodeSettings(nodeOrdinal))
+            .put(
+                remoteStoreClusterSettings(
+                    REPOSITORY_NAME,
+                    segmentRepoPath,
+                    MockFsRepositoryPlugin.TYPE,
+                    REPOSITORY_2_NAME,
+                    translogRepoPath,
+                    MockFsRepositoryPlugin.TYPE
+                )
+            )
+            .build();
+    }
+
     @Before
     public void setup() {
+        clusterSettingsSuppliedByTest = true;
         overrideBuildRepositoryMetadata = false;
         repositoryLocation = randomRepoPath();
         compress = randomBoolean();
@@ -86,27 +103,27 @@ public class RemoteStoreMultipartIT extends RemoteStoreIT {
         } else {
             return super.buildRepositoryMetadata(node, name);
         }
+
     }
 
     public void testRateLimitedRemoteUploads() throws Exception {
+        clusterSettingsSuppliedByTest = true;
         overrideBuildRepositoryMetadata = true;
-        internalCluster().startNode();
+        Settings.Builder clusterSettings = Settings.builder()
+            .put(remoteStoreClusterSettings(REPOSITORY_NAME, repositoryLocation, REPOSITORY_2_NAME, repositoryLocation));
+        clusterSettings.put(
+            String.format(Locale.getDefault(), "node.attr." + REMOTE_STORE_REPOSITORY_TYPE_ATTRIBUTE_KEY_FORMAT, REPOSITORY_NAME),
+            MockFsRepositoryPlugin.TYPE
+        );
+        internalCluster().startNode(clusterSettings.build());
         Client client = client();
         logger.info("-->  updating repository");
-        assertAcked(
-            client.admin()
-                .cluster()
-                .preparePutRepository(REPOSITORY_NAME)
-                .setType(MockFsRepositoryPlugin.TYPE)
-                .setSettings(
-                    Settings.builder()
-                        .put(BlobStoreRepository.SYSTEM_REPOSITORY_SETTING.getKey(), true)
-                        .put("location", repositoryLocation)
-                        .put("compress", compress)
-                        .put("max_remote_upload_bytes_per_sec", "1kb")
-                        .put("chunk_size", 100, ByteSizeUnit.BYTES)
-                )
-        );
+        Settings.Builder settings = Settings.builder()
+            .put("location", repositoryLocation)
+            .put("compress", compress)
+            .put("max_remote_upload_bytes_per_sec", "1kb")
+            .put("chunk_size", 100, ByteSizeUnit.BYTES);
+        createRepository(REPOSITORY_NAME, MockFsRepositoryPlugin.TYPE, settings);
 
         createIndex(INDEX_NAME, remoteStoreIndexSettings(0));
         ensureGreen();
@@ -125,6 +142,6 @@ public class RemoteStoreMultipartIT extends RemoteStoreIT {
             assertThat(uploadPauseTime, greaterThan(TimeValue.timeValueSeconds(randomIntBetween(5, 10)).nanos()));
         }, 30, TimeUnit.SECONDS);
 
-        assertThat(client.prepareSearch(INDEX_NAME).setSize(0).get().getHits().getTotalHits().value, equalTo(10L));
+        assertThat(client.prepareSearch(INDEX_NAME).setSize(0).get().getHits().getTotalHits().value(), equalTo(10L));
     }
 }

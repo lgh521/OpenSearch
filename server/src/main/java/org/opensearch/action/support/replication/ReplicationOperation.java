@@ -141,15 +141,7 @@ public class ReplicationOperation<
         final ShardRouting primaryRouting = primary.routingEntry();
         final ShardId primaryId = primaryRouting.shardId();
         if (activeShardCountFailure != null) {
-            finishAsFailed(
-                new UnavailableShardsException(
-                    primaryId,
-                    "{} Timeout: [{}], request: [{}]",
-                    activeShardCountFailure,
-                    request.timeout(),
-                    request
-                )
-            );
+            finishAsFailed(new UnavailableShardsException(primaryId, "{} Timeout: [{}]", activeShardCountFailure, request.timeout()));
             return;
         }
 
@@ -479,7 +471,7 @@ public class ReplicationOperation<
 
         /**
          * Notifies the primary of a local checkpoint for the given allocation.
-         *
+         * <p>
          * Note: The primary will use this information to advance the global checkpoint if possible.
          *
          * @param allocationId allocation ID of the shard corresponding to the supplied local checkpoint

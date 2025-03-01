@@ -37,6 +37,7 @@ import org.apache.lucene.util.CollectionUtil;
 import org.opensearch.action.FailedNodeException;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeReadAction;
+import org.opensearch.cluster.ClusterManagerMetrics;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.block.ClusterBlockLevel;
@@ -88,6 +89,7 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
     private static final Logger logger = LogManager.getLogger(TransportIndicesShardStoresAction.class);
 
     private final TransportNodesListGatewayStartedShards listShardStoresInfo;
+    private final ClusterManagerMetrics clusterManagerMetrics;
 
     @Inject
     public TransportIndicesShardStoresAction(
@@ -96,7 +98,8 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
         ThreadPool threadPool,
         ActionFilters actionFilters,
         IndexNameExpressionResolver indexNameExpressionResolver,
-        TransportNodesListGatewayStartedShards listShardStoresInfo
+        TransportNodesListGatewayStartedShards listShardStoresInfo,
+        ClusterManagerMetrics clusterManagerMetrics
     ) {
         super(
             IndicesShardStoresAction.NAME,
@@ -105,9 +108,11 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
             threadPool,
             actionFilters,
             IndicesShardStoresRequest::new,
-            indexNameExpressionResolver
+            indexNameExpressionResolver,
+            true
         );
         this.listShardStoresInfo = listShardStoresInfo;
+        this.clusterManagerMetrics = clusterManagerMetrics;
     }
 
     @Override
@@ -153,7 +158,7 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
         // we could fetch all shard store info from every node once (nNodes requests)
         // we have to implement a TransportNodesAction instead of using TransportNodesListGatewayStartedShards
         // for fetching shard stores info, that operates on a list of shards instead of a single shard
-        new AsyncShardStoresInfoFetches(state.nodes(), routingNodes, shardsToFetch, listener).start();
+        new AsyncShardStoresInfoFetches(state.nodes(), routingNodes, shardsToFetch, listener, clusterManagerMetrics).start();
     }
 
     @Override
@@ -174,12 +179,14 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
         private final ActionListener<IndicesShardStoresResponse> listener;
         private CountDown expectedOps;
         private final Queue<InternalAsyncFetch.Response> fetchResponses;
+        private final ClusterManagerMetrics clusterManagerMetrics;
 
         AsyncShardStoresInfoFetches(
             DiscoveryNodes nodes,
             RoutingNodes routingNodes,
             Set<Tuple<ShardId, String>> shards,
-            ActionListener<IndicesShardStoresResponse> listener
+            ActionListener<IndicesShardStoresResponse> listener,
+            ClusterManagerMetrics clusterManagerMetrics
         ) {
             this.nodes = nodes;
             this.routingNodes = routingNodes;
@@ -187,6 +194,7 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
             this.listener = listener;
             this.fetchResponses = new ConcurrentLinkedQueue<>();
             this.expectedOps = new CountDown(shards.size());
+            this.clusterManagerMetrics = clusterManagerMetrics;
         }
 
         void start() {
@@ -194,8 +202,15 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
                 listener.onResponse(new IndicesShardStoresResponse());
             } else {
                 for (Tuple<ShardId, String> shard : shards) {
-                    InternalAsyncFetch fetch = new InternalAsyncFetch(logger, "shard_stores", shard.v1(), shard.v2(), listShardStoresInfo);
-                    fetch.fetchData(nodes, Collections.<String>emptySet());
+                    InternalAsyncFetch fetch = new InternalAsyncFetch(
+                        logger,
+                        "shard_stores",
+                        shard.v1(),
+                        shard.v2(),
+                        listShardStoresInfo,
+                        clusterManagerMetrics
+                    );
+                    fetch.fetchData(nodes, Collections.emptyMap());
                 }
             }
         }
@@ -212,9 +227,10 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
                 String type,
                 ShardId shardId,
                 String customDataPath,
-                TransportNodesListGatewayStartedShards action
+                TransportNodesListGatewayStartedShards action,
+                ClusterManagerMetrics clusterManagerMetrics
             ) {
-                super(logger, type, shardId, customDataPath, action);
+                super(logger, type, shardId, customDataPath, action, clusterManagerMetrics);
             }
 
             @Override
@@ -223,7 +239,7 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
                 List<FailedNodeException> failures,
                 long fetchingRound
             ) {
-                fetchResponses.add(new Response(shardId, responses, failures));
+                fetchResponses.add(new Response(shardAttributesMap.keySet().iterator().next(), responses, failures));
                 if (expectedOps.countDown()) {
                     finish();
                 }
@@ -258,9 +274,9 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
                             storeStatuses.add(
                                 new IndicesShardStoresResponse.StoreStatus(
                                     response.getNode(),
-                                    response.allocationId(),
+                                    response.getGatewayShardStarted().allocationId(),
                                     allocationStatus,
-                                    response.storeException()
+                                    response.getGatewayShardStarted().storeException()
                                 )
                             );
                         }
@@ -308,11 +324,12 @@ public class TransportIndicesShardStoresAction extends TransportClusterManagerNo
              * A shard exists/existed in a node only if shard state file exists in the node
              */
             private boolean shardExistsInNode(final NodeGatewayStartedShards response) {
-                return response.storeException() != null || response.allocationId() != null;
+                return response.getGatewayShardStarted().storeException() != null
+                    || response.getGatewayShardStarted().allocationId() != null;
             }
 
             @Override
-            protected void reroute(ShardId shardId, String reason) {
+            protected void reroute(String shardId, String reason) {
                 // no-op
             }
 

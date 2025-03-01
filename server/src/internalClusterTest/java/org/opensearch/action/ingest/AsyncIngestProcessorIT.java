@@ -36,7 +36,6 @@ import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.get.GetRequest;
 import org.opensearch.action.get.GetResponse;
 import org.opensearch.action.index.IndexRequest;
-import org.opensearch.client.Client;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.common.bytes.BytesArray;
@@ -55,6 +54,7 @@ import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
 import org.opensearch.test.OpenSearchSingleNodeTestCase;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
 import java.util.Collection;
@@ -69,7 +69,7 @@ import static org.hamcrest.Matchers.equalTo;
 /**
  * The purpose of this test is to verify that when a processor executes an operation asynchronously that
  * the expected result is the same as if the same operation happens synchronously.
- *
+ * <p>
  * In this test two test processor are defined that basically do the same operation, but a single processor
  * executes asynchronously. The result of the operation should be the same and also the order in which the
  * bulk responses are returned should be the same as how the corresponding index requests were defined.

@@ -37,20 +37,22 @@ import org.opensearch.action.support.ActiveShardCount;
 import org.opensearch.action.support.WriteRequestBuilder;
 import org.opensearch.action.support.replication.ReplicationRequest;
 import org.opensearch.action.support.single.instance.InstanceShardOperationRequestBuilder;
-import org.opensearch.client.OpenSearchClient;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.xcontent.MediaType;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.index.VersionType;
 import org.opensearch.script.Script;
+import org.opensearch.transport.client.OpenSearchClient;
 
 import java.util.Map;
 
 /**
  * Transport request builder for updating an index
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "1.0.0")
 public class UpdateRequestBuilder extends InstanceShardOperationRequestBuilder<UpdateRequest, UpdateResponse, UpdateRequestBuilder>
     implements
         WriteRequestBuilder<UpdateRequestBuilder> {

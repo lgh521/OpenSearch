@@ -62,6 +62,7 @@ import org.opensearch.search.SearchModule;
 import org.opensearch.search.aggregations.AggregationsTests;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.internal.InternalSearchResponse;
+import org.opensearch.search.pipeline.ProcessorExecutionDetail;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.profile.SearchProfileShardResultsTests;
 import org.opensearch.search.suggest.Suggest;
@@ -74,7 +75,10 @@ import org.junit.Before;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 import static java.util.Collections.singletonMap;
@@ -152,6 +156,11 @@ public class SearchResponseTests extends OpenSearchTestCase {
         Boolean terminatedEarly = randomBoolean() ? null : randomBoolean();
         int numReducePhases = randomIntBetween(1, 10);
         long tookInMillis = randomNonNegativeLong();
+        Map<String, Long> phaseTookMap = new HashMap<>();
+        for (SearchPhaseName searchPhaseName : SearchPhaseName.values()) {
+            phaseTookMap.put(searchPhaseName.getName(), randomNonNegativeLong());
+        }
+        SearchResponse.PhaseTook phaseTook = new SearchResponse.PhaseTook(phaseTookMap);
         int totalShards = randomIntBetween(1, Integer.MAX_VALUE);
         int successfulShards = randomIntBetween(0, totalShards);
         int skippedShards = randomIntBetween(0, totalShards);
@@ -169,7 +178,8 @@ public class SearchResponseTests extends OpenSearchTestCase {
                 timedOut,
                 terminatedEarly,
                 numReducePhases,
-                searchExtBuilders
+                searchExtBuilders,
+                Collections.emptyList()
             );
         } else {
             internalSearchResponse = InternalSearchResponse.empty();
@@ -182,6 +192,7 @@ public class SearchResponseTests extends OpenSearchTestCase {
             successfulShards,
             skippedShards,
             tookInMillis,
+            phaseTook,
             shardSearchFailures,
             randomBoolean() ? randomClusters() : SearchResponse.Clusters.EMPTY,
             null
@@ -303,6 +314,26 @@ public class SearchResponseTests extends OpenSearchTestCase {
         hit.score(2.0f);
         SearchHit[] hits = new SearchHit[] { hit };
         String dummyId = UUID.randomUUID().toString();
+        List<ProcessorExecutionDetail> processorResults = List.of(
+            new ProcessorExecutionDetail(
+                "processor1",
+                50,
+                List.of(1),
+                List.of(1),
+                ProcessorExecutionDetail.ProcessorStatus.SUCCESS,
+                null,
+                null
+            ),
+            new ProcessorExecutionDetail(
+                "processor2",
+                30,
+                List.of(3),
+                List.of(3),
+                ProcessorExecutionDetail.ProcessorStatus.SUCCESS,
+                null,
+                null
+            )
+        );
         {
             SearchResponse response = new SearchResponse(
                 new InternalSearchResponse(
@@ -313,7 +344,8 @@ public class SearchResponseTests extends OpenSearchTestCase {
                     false,
                     null,
                     1,
-                    List.of(new DummySearchExtBuilder(dummyId))
+                    List.of(new DummySearchExtBuilder(dummyId)),
+                    processorResults
                 ),
                 null,
                 0,
@@ -346,6 +378,22 @@ public class SearchResponseTests extends OpenSearchTestCase {
                 {
                     expectedString.append("{\"dummy\":\"" + dummyId + "\"}");
                 }
+                expectedString.append(",\"processor_results\":");
+                expectedString.append("[");
+                for (int i = 0; i < processorResults.size(); i++) {
+                    ProcessorExecutionDetail detail = processorResults.get(i);
+                    expectedString.append("{");
+                    expectedString.append("\"processor_name\":\"").append(detail.getProcessorName()).append("\",");
+                    expectedString.append("\"duration_millis\":").append(detail.getDurationMillis()).append(",");
+                    expectedString.append("\"status\":\"").append(detail.getStatus().toString().toLowerCase(Locale.ROOT)).append("\",");
+                    expectedString.append("\"input_data\":").append(detail.getInputData()).append(",");
+                    expectedString.append("\"output_data\":").append(detail.getOutputData());
+                    expectedString.append("}");
+                    if (i < processorResults.size() - 1) {
+                        expectedString.append(",");
+                    }
+                }
+                expectedString.append("]");
             }
             expectedString.append("}");
             assertEquals(expectedString.toString(), Strings.toString(MediaTypeRegistry.JSON, response));
@@ -353,6 +401,14 @@ public class SearchResponseTests extends OpenSearchTestCase {
             assertEquals(1, searchExtBuilders.size());
         }
         {
+            Map<String, Long> phaseTookMap = new HashMap<>();
+            for (SearchPhaseName searchPhaseName : SearchPhaseName.values()) {
+                phaseTookMap.put(searchPhaseName.getName(), 0L);
+            }
+            phaseTookMap.put(SearchPhaseName.QUERY.getName(), 50L);
+            phaseTookMap.put(SearchPhaseName.FETCH.getName(), 25L);
+            phaseTookMap.put(SearchPhaseName.EXPAND.getName(), 30L);
+            SearchResponse.PhaseTook phaseTook = new SearchResponse.PhaseTook(phaseTookMap);
             SearchResponse response = new SearchResponse(
                 new InternalSearchResponse(
                     new SearchHits(hits, new TotalHits(100, TotalHits.Relation.EQUAL_TO), 1.5f),
@@ -368,13 +424,24 @@ public class SearchResponseTests extends OpenSearchTestCase {
                 0,
                 0,
                 0,
+                phaseTook,
                 ShardSearchFailure.EMPTY_ARRAY,
-                new SearchResponse.Clusters(5, 3, 2)
+                new SearchResponse.Clusters(5, 3, 2),
+                null
             );
             StringBuilder expectedString = new StringBuilder();
             expectedString.append("{");
             {
                 expectedString.append("\"took\":0,");
+                expectedString.append("\"phase_took\":");
+                {
+                    expectedString.append("{\"dfs_pre_query\":0,");
+                    expectedString.append("\"query\":50,");
+                    expectedString.append("\"fetch\":25,");
+                    expectedString.append("\"dfs_query\":0,");
+                    expectedString.append("\"expand\":30,");
+                    expectedString.append("\"can_match\":0},");
+                }
                 expectedString.append("\"timed_out\":false,");
                 expectedString.append("\"_shards\":");
                 {
@@ -407,8 +474,8 @@ public class SearchResponseTests extends OpenSearchTestCase {
         if (searchResponse.getHits().getTotalHits() == null) {
             assertNull(deserialized.getHits().getTotalHits());
         } else {
-            assertEquals(searchResponse.getHits().getTotalHits().value, deserialized.getHits().getTotalHits().value);
-            assertEquals(searchResponse.getHits().getTotalHits().relation, deserialized.getHits().getTotalHits().relation);
+            assertEquals(searchResponse.getHits().getTotalHits().value(), deserialized.getHits().getTotalHits().value());
+            assertEquals(searchResponse.getHits().getTotalHits().relation(), deserialized.getHits().getTotalHits().relation());
         }
         assertEquals(searchResponse.getHits().getHits().length, deserialized.getHits().getHits().length);
         assertEquals(searchResponse.getNumReducePhases(), deserialized.getNumReducePhases());
@@ -425,8 +492,8 @@ public class SearchResponseTests extends OpenSearchTestCase {
         if (searchResponse.getHits().getTotalHits() == null) {
             assertNull(deserialized.getHits().getTotalHits());
         } else {
-            assertEquals(searchResponse.getHits().getTotalHits().value, deserialized.getHits().getTotalHits().value);
-            assertEquals(searchResponse.getHits().getTotalHits().relation, deserialized.getHits().getTotalHits().relation);
+            assertEquals(searchResponse.getHits().getTotalHits().value(), deserialized.getHits().getTotalHits().value());
+            assertEquals(searchResponse.getHits().getTotalHits().relation(), deserialized.getHits().getTotalHits().relation());
         }
         assertEquals(searchResponse.getHits().getHits().length, deserialized.getHits().getHits().length);
         assertEquals(searchResponse.getNumReducePhases(), deserialized.getNumReducePhases());
@@ -447,8 +514,8 @@ public class SearchResponseTests extends OpenSearchTestCase {
         if (searchResponse.getHits().getTotalHits() == null) {
             assertNull(deserialized.getHits().getTotalHits());
         } else {
-            assertEquals(searchResponse.getHits().getTotalHits().value, deserialized.getHits().getTotalHits().value);
-            assertEquals(searchResponse.getHits().getTotalHits().relation, deserialized.getHits().getTotalHits().relation);
+            assertEquals(searchResponse.getHits().getTotalHits().value(), deserialized.getHits().getTotalHits().value());
+            assertEquals(searchResponse.getHits().getTotalHits().relation(), deserialized.getHits().getTotalHits().relation());
         }
         assertEquals(searchResponse.getHits().getHits().length, deserialized.getHits().getHits().length);
         assertEquals(searchResponse.getNumReducePhases(), deserialized.getNumReducePhases());
@@ -475,6 +542,24 @@ public class SearchResponseTests extends OpenSearchTestCase {
         XContentBuilder builder = XContentBuilder.builder(MediaTypeRegistry.JSON.xContent());
         deserialized.getClusters().toXContent(builder, ToXContent.EMPTY_PARAMS);
         assertEquals(0, builder.toString().length());
+    }
+
+    public void testSearchResponsePhaseTookEquals() throws IOException {
+        SearchResponse.PhaseTook phaseTookA = new SearchResponse.PhaseTook(Map.of("foo", 0L, "bar", 1L));
+        SearchResponse.PhaseTook phaseTookB = new SearchResponse.PhaseTook(Map.of("foo", 1L, "bar", 1L));
+        SearchResponse.PhaseTook phaseTookC = new SearchResponse.PhaseTook(Map.of("foo", 0L));
+        SearchResponse.PhaseTook phaseTookD = new SearchResponse.PhaseTook(Map.of());
+
+        assertNotEquals(phaseTookA, phaseTookB);
+        assertNotEquals(phaseTookB, phaseTookA);
+        assertNotEquals(phaseTookA, phaseTookC);
+        assertNotEquals(phaseTookC, phaseTookA);
+        assertNotEquals(phaseTookA, phaseTookD);
+        assertNotEquals(phaseTookD, phaseTookA);
+        assertEquals(phaseTookA, phaseTookA);
+        assertEquals(phaseTookB, phaseTookB);
+        assertEquals(phaseTookC, phaseTookC);
+        assertEquals(phaseTookD, phaseTookD);
     }
 
     static class DummySearchExtBuilder extends SearchExtBuilder {

@@ -25,6 +25,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.codec.CodecService;
 import org.opensearch.index.codec.CodecServiceConfig;
 import org.opensearch.index.codec.CodecServiceFactory;
+import org.opensearch.index.mapper.DocumentMapperForType;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.seqno.RetentionLeases;
 import org.opensearch.index.store.Store;
@@ -152,9 +153,10 @@ public class EngineConfigFactory {
         LongSupplier primaryTermSupplier,
         EngineConfig.TombstoneDocSupplier tombstoneDocSupplier,
         boolean isReadOnlyReplica,
-        BooleanSupplier primaryModeSupplier,
+        BooleanSupplier startedPrimarySupplier,
         TranslogFactory translogFactory,
-        Comparator<LeafReader> leafSorter
+        Comparator<LeafReader> leafSorter,
+        Supplier<DocumentMapperForType> documentMapperForTypeSupplier
     ) {
         CodecService codecServiceToUse = codecService;
         if (codecService == null && this.codecServiceFactory != null) {
@@ -185,9 +187,10 @@ public class EngineConfigFactory {
             .primaryTermSupplier(primaryTermSupplier)
             .tombstoneDocSupplier(tombstoneDocSupplier)
             .readOnlyReplica(isReadOnlyReplica)
-            .primaryModeSupplier(primaryModeSupplier)
+            .startedPrimarySupplier(startedPrimarySupplier)
             .translogFactory(translogFactory)
             .leafSorter(leafSorter)
+            .documentMapperForTypeSupplier(documentMapperForTypeSupplier)
             .build();
     }
 

@@ -38,8 +38,6 @@ import org.opensearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.opensearch.action.admin.indices.create.CreateIndexRequestBuilder;
 import org.opensearch.action.admin.indices.get.GetIndexResponse;
 import org.opensearch.action.support.IndicesOptions;
-import org.opensearch.client.Client;
-import org.opensearch.client.Requests;
 import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.health.ClusterHealthStatus;
 import org.opensearch.cluster.metadata.IndexMetadata;
@@ -75,6 +73,8 @@ import org.opensearch.telemetry.TelemetrySettings;
 import org.opensearch.test.telemetry.MockTelemetryPlugin;
 import org.opensearch.test.telemetry.tracing.StrictCheckSpanProcessor;
 import org.opensearch.transport.TransportSettings;
+import org.opensearch.transport.client.Client;
+import org.opensearch.transport.client.Requests;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
@@ -254,13 +254,12 @@ public abstract class OpenSearchSingleNodeTestCase extends OpenSearchTestCase {
             .putList(INITIAL_CLUSTER_MANAGER_NODES_SETTING.getKey(), nodeName)
             .put(FeatureFlags.TELEMETRY_SETTING.getKey(), true)
             .put(TelemetrySettings.TRACER_ENABLED_SETTING.getKey(), true)
-            .put(nodeSettings()) // allow test cases to provide their own settings or override these
-            .put(featureFlagSettings);
-        if (FeatureFlags.CONCURRENT_SEGMENT_SEARCH_SETTING.get(featureFlagSettings)) {
+            .put(TelemetrySettings.TRACER_FEATURE_ENABLED_SETTING.getKey(), true)
             // By default, for tests we will put the target slice count of 2. This will increase the probability of having multiple slices
             // when tests are run with concurrent segment search enabled
-            settingsBuilder.put(SearchService.CONCURRENT_SEGMENT_SEARCH_TARGET_MAX_SLICE_COUNT_KEY, 2);
-        }
+            .put(SearchService.CONCURRENT_SEGMENT_SEARCH_TARGET_MAX_SLICE_COUNT_KEY, 2)
+            .put(nodeSettings()) // allow test cases to provide their own settings or override these
+            .put(featureFlagSettings);
 
         Collection<Class<? extends Plugin>> plugins = getPlugins();
         if (plugins.contains(getTestTransportPlugin()) == false) {
@@ -271,6 +270,7 @@ public abstract class OpenSearchSingleNodeTestCase extends OpenSearchTestCase {
             plugins.add(MockHttpTransport.TestPlugin.class);
         }
         plugins.add(MockScriptService.TestPlugin.class);
+
         plugins.add(MockTelemetryPlugin.class);
         Node node = new MockNode(settingsBuilder.build(), plugins, forbidPrivateIndexSettings());
         try {
@@ -438,6 +438,7 @@ public abstract class OpenSearchSingleNodeTestCase extends OpenSearchTestCase {
             featureSettings.put(builtInFlag.getKey(), builtInFlag.getDefaultRaw(Settings.EMPTY));
         }
         featureSettings.put(FeatureFlags.TELEMETRY_SETTING.getKey(), true);
+        featureSettings.put(FeatureFlags.APPLICATION_BASED_CONFIGURATION_TEMPLATES_SETTING.getKey(), true);
         return featureSettings.build();
     }
 
